@@ -1,39 +1,30 @@
 # Payment target contract
 
-As of July 2026, `sce-pay` targets SCE's own authenticated payment route:
+The entry URL is:
 
 ```text
 https://www.sce.com/mysce/billsnpayments/paybills
 ```
 
-The former external card portal is not an accepted target and no external
-processor domains are allowlisted by default.
+The automation uses the Guest Pay path reached from this page. It does not use
+the retired legacy external card portal and does not require an SCE username,
+password, MFA session, or authenticated My Account profile.
 
-## Runtime rules
+Because SCE's public help pages have historically lagged the live application,
+the adapter does not hard-code an external processor name. Onboarding records
+the exact HTTPS origins that the user personally reviews during the current
+guest flow.
 
-1. Start at the exact HTTPS URL above.
-2. Permit query strings, fragments, and subroutes under that payment path.
-3. Require the top-level page to remain on `www.sce.com` through review and
-   immediately before the final payment action.
-4. Stop on popups, external redirects, unrelated SCE routes, login challenges,
-   CAPTCHA, missing labels, ambiguous controls, or changed payment arithmetic.
-5. Never learn or persist a new host from a redirect. A target change is a code
-   change and must be reviewed.
+Runtime rules:
 
-Raw card fields remain outside the automation boundary. The user enters or
-updates card data directly in SCE's interface; the automated run selects only a
-previously available method whose last four digits match the authorization.
+1. Start at the configured SCE URL.
+2. Permit only top-level origins approved during onboarding.
+3. Permit embedded payment frames only from approved origins.
+4. Reject popups.
+5. Stop on CAPTCHA, login requests, maintenance, missing labels, missing saved
+   method, changed review arithmetic, or an unknown confirmation.
+6. Never learn a new origin during an unattended run.
+7. Never fill raw card fields.
 
-## Verification after an SCE change
-
-Run:
-
-```bash
-sce-pay login
-sce-pay run --dry-run --headed
-```
-
-Confirm that the browser remains on the SCE payment route, the intended account
-and saved card are visible, the full amount due is unchanged on review, and the
-fee plus amount equals the displayed total. A dry run never activates the final
-payment control.
+A payment-origin change is a new onboarding event, not an automatic allowlist
+update.

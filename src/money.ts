@@ -1,29 +1,26 @@
-import { SafetyStopError } from "./errors.js";
+import { PolicyStopError } from "./errors.js";
 
-const MONEY_PATTERN = /\$?\s*([\d,]+)(?:\.(\d{2}))?/;
-
-export function parseMoneyToCents(value: string): number {
-  const match = MONEY_PATTERN.exec(value);
-  if (match === null) {
-    throw new SafetyStopError(`Could not parse a monetary amount from "${value}".`);
+export function parseMoneyToCents(text: string): number {
+  const match = text.match(/(-?)\$?\s*([\d,]+)(?:\.(\d{1,2}))?/);
+  if (!match?.[2]) {
+    throw new PolicyStopError("A required monetary value could not be read.");
   }
-
-  const dollars = Number.parseInt((match[1] ?? "").replaceAll(",", ""), 10);
-  const cents = Number.parseInt(match[2] ?? "00", 10);
-  const result = dollars * 100 + cents;
-
-  if (!Number.isSafeInteger(result) || result < 0) {
-    throw new SafetyStopError(`The parsed amount "${value}" is not safe to use.`);
+  if (match[1] === "-") {
+    throw new PolicyStopError("A required monetary value was negative.");
   }
-
-  return result;
+  const dollars = Number.parseInt(match[2].replaceAll(",", ""), 10);
+  const cents = Number.parseInt((match[3] ?? "").padEnd(2, "0"), 10);
+  const amount = dollars * 100 + cents;
+  if (!Number.isSafeInteger(amount) || amount < 0) {
+    throw new PolicyStopError("A monetary value was invalid.");
+  }
+  return amount;
 }
 
 export function formatCents(cents: number): string {
   if (!Number.isSafeInteger(cents) || cents < 0) {
     throw new TypeError("cents must be a non-negative safe integer");
   }
-
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",

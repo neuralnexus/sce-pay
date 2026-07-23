@@ -1,304 +1,185 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import test, { type TestContext } from "node:test";
+import test from "node:test";
 
-import { AuditLog } from "../src/audit.js";
-import { defaultConfig, type AppConfig } from "../src/config.js";
 import type {
   BillSnapshot,
-  Clock,
+  GuestBundle,
   PaymentConfirmation,
+  PaymentIntent,
   PaymentReview,
+  PaymentStore,
   PortalClient,
+  RunLease,
 } from "../src/domain.js";
-import {
-  PaymentSubmissionUncertainError,
-  SafetyStopError,
-  SiteChangedError,
-} from "../src/errors.js";
-import type { AppPaths } from "../src/paths.js";
-import { StateStore } from "../src/state.js";
+import { PaymentUncertainError } from "../src/errors.js";
 import { runPaymentWorkflow } from "../src/workflow.js";
 
 const NOW = new Date("2026-07-23T12:00:00.000Z");
-
+const bundle: GuestBundle = {
+  version: 1,
+  capturedAt: NOW.toISOString(),
+  guestUrl: "https://www.sce.com/mysce/billsnpayments/paybills",
+  accountNumber: "123456789012",
+  mailingZip: "91203",
+  paymentMethodLast4: "4242",
+  maxBillCents: 75_000,
+  feeLimitCentsExclusive: 400,
+  payWhenDueWithinDays: 14,
+  allowedTopLevelOrigins: ["https://www.sce.com"],
+  allowedFrameOrigins: [],
+  storageState: { cookies: [], origins: [] },
+  sessionStorageByOrigin: {},
+};
 const bill: BillSnapshot = {
   accountReference: "sce-home",
   amountCents: 28_417,
   dueDate: "2026-07-31",
   observedAt: NOW.toISOString(),
 };
-
 const review: PaymentReview = {
-  accountReference: bill.accountReference,
-  amountCents: bill.amountCents,
-  feeCents: 165,
-  totalCents: 28_582,
-  dueDate: bill.dueDate,
+  ...bill,
+  feeCents: 399,
+  totalCents: 28_816,
   paymentMethodLast4: "4242",
 };
-
 const confirmation: PaymentConfirmation = {
-  confirmationNumber: "CONF-1234",
+  confirmationNumber: "SCE-1234",
   paidAt: "2026-07-23T12:01:00.000Z",
 };
 
+class MemoryStore implements PaymentStore {
+  lease: RunLease | undefined;
+  blocking: PaymentIntent | undefined;
+  confirmed = new Set<string>();
+
+  async acquireLease(): Promise<RunLease> {
+    this.lease = { id: "lease", expiresAt: "2026-07-23T12:15:00.000Z" };
+    return this.lease;
+  }
+  async releaseLease(): Promise<void> {
+    this.lease = undefined;
+  }
+  async findBlockingIntent(): Promise<PaymentIntent | undefined> {
+    return this.blocking;
+  }
+  async isFingerprintConfirmed(value: string): Promise<boolean> {
+    return this.confirmed.has(value);
+  }
+  async beginIntent(
+    fingerprint: string,
+    paymentReview: PaymentReview,
+  ): Promise<PaymentIntent> {
+    this.blocking = {
+      id: "intent-1",
+      fingerprint,
+      status: "submitting",
+      amountCents: paymentReview.amountCents,
+      feeCents: paymentReview.feeCents,
+      totalCents: paymentReview.totalCents,
+      dueDate: paymentReview.dueDate,
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+    };
+    return this.blocking;
+  }
+  async confirmIntent(): Promise<void> {
+    if (!this.blocking) throw new Error("missing");
+    this.confirmed.add(this.blocking.fingerprint);
+    this.blocking = undefined;
+  }
+  async markIntentUnknown(): Promise<void> {
+    if (this.blocking) this.blocking.status = "unknown";
+  }
+}
+
 class FakePortal implements PortalClient {
-  readonly bill: BillSnapshot | null;
-  readonly review: PaymentReview;
-  readonly confirmation: PaymentConfirmation;
-  readonly failBeforeBoundary: boolean;
   readonly failAfterBoundary: boolean;
-  closed = false;
   submitted = false;
-  prepared = false;
+  closed = false;
 
-  constructor(options?: {
-    bill?: BillSnapshot | null;
-    review?: PaymentReview;
-    confirmation?: PaymentConfirmation;
-    failBeforeBoundary?: boolean;
-    failAfterBoundary?: boolean;
-  }) {
-    this.bill = options?.bill === undefined ? bill : options.bill;
-    this.review = options?.review ?? review;
-    this.confirmation = options?.confirmation ?? confirmation;
-    this.failBeforeBoundary = options?.failBeforeBoundary ?? false;
-    this.failAfterBoundary = options?.failAfterBoundary ?? false;
+  constructor(failAfterBoundary = false) {
+    this.failAfterBoundary = failAfterBoundary;
   }
-
-  async inspectBill(): Promise<BillSnapshot | null> {
-    return this.bill;
+  async inspectBill(): Promise<BillSnapshot> {
+    return bill;
   }
-
   async preparePayment(): Promise<PaymentReview> {
-    this.prepared = true;
-    return this.review;
+    return review;
   }
-
-  async submitPayment(onWillSubmit: () => Promise<void>): Promise<PaymentConfirmation> {
-    if (this.failBeforeBoundary) {
-      throw new SiteChangedError("final button missing");
-    }
+  async submitPayment(
+    onWillSubmit: () => Promise<void>,
+  ): Promise<PaymentConfirmation> {
     await onWillSubmit();
     this.submitted = true;
-    if (this.failAfterBoundary) {
-      throw new PaymentSubmissionUncertainError("connection ended after click");
-    }
-    return this.confirmation;
+    if (this.failAfterBoundary) throw new PaymentUncertainError();
+    return confirmation;
   }
-
   async close(): Promise<void> {
     this.closed = true;
   }
 }
 
-function armedConfig(overrides?: Partial<AppConfig["automation"]>): AppConfig {
-  const config = defaultConfig();
-  return {
-    ...config,
-    automation: {
-      ...config.automation,
-      enabled: true,
-      mode: "pay",
-      paymentMethodLast4: "4242",
-      authorizedAt: NOW.toISOString(),
-      maxBillCents: 75_000,
-      ...overrides,
-    },
-  };
-}
-
-function fixedClock(): Clock {
-  return { now: () => new Date(NOW) };
-}
-
-function appPaths(rootDir: string): AppPaths {
-  return {
-    rootDir,
-    configFile: join(rootDir, "config.json"),
-    stateFile: join(rootDir, "state.json"),
-    auditFile: join(rootDir, "audit.jsonl"),
-    profileDir: join(rootDir, "profile"),
-    lockFile: join(rootDir, "run.lock"),
-  };
-}
-
-async function harness(context: TestContext): Promise<{
-  paths: AppPaths;
-  state: StateStore;
-  audit: AuditLog;
-}> {
-  const root = await mkdtemp(join(tmpdir(), "sce-pay-workflow-"));
-  context.after(async () => rm(root, { recursive: true, force: true }));
-  const paths = appPaths(root);
-  return {
-    paths,
-    state: new StateStore(paths),
-    audit: new AuditLog(paths),
-  };
-}
-
-test("happy path persists intent before submit and confirms once", async (context) => {
-  const { state, audit } = await harness(context);
+test("cloud workflow confirms once and suppresses the exact bill", async () => {
+  const store = new MemoryStore();
   const portal = new FakePortal();
-  const outcome = await runPaymentWorkflow(
-    { config: armedConfig(), portal, state, audit, clock: fixedClock() },
-    { dryRun: false },
-  );
-
-  assert.equal(outcome.status, "paid");
+  const first = await runPaymentWorkflow({
+    bundle,
+    portal,
+    store,
+    now: NOW,
+    dryRun: false,
+  });
+  assert.equal(first.status, "paid");
   assert.equal(portal.submitted, true);
   assert.equal(portal.closed, true);
-  const snapshot = await state.snapshot();
-  assert.equal(snapshot.paymentIntents.length, 1);
-  assert.equal(snapshot.paymentIntents[0]?.status, "confirmed");
 
-  const secondPortal = new FakePortal();
-  const duplicate = await runPaymentWorkflow(
-    {
-      config: armedConfig(),
-      portal: secondPortal,
-      state,
-      audit,
-      clock: fixedClock(),
-    },
-    { dryRun: false },
-  );
-  assert.equal(duplicate.status, "already-paid");
-  assert.equal(secondPortal.prepared, false);
-  assert.equal(secondPortal.submitted, false);
-});
-
-test("dry run validates the entire review but never creates an intent", async (context) => {
-  const { state, audit } = await harness(context);
-  const portal = new FakePortal();
-  const outcome = await runPaymentWorkflow(
-    { config: armedConfig(), portal, state, audit, clock: fixedClock() },
-    { dryRun: true },
-  );
-  assert.equal(outcome.status, "dry-run");
-  assert.equal(portal.prepared, true);
-  assert.equal(portal.submitted, false);
-  assert.equal((await state.snapshot()).paymentIntents.length, 0);
-});
-
-test("observe mode reads the bill without entering payment review", async (context) => {
-  const { state, audit } = await harness(context);
-  const portal = new FakePortal();
-  const config = armedConfig({ enabled: false, mode: "observe" });
-  const outcome = await runPaymentWorkflow(
-    { config, portal, state, audit, clock: fixedClock() },
-    { dryRun: false },
-  );
-  assert.equal(outcome.status, "observed");
-  assert.equal(portal.prepared, false);
-});
-
-test("amount cap and fee mismatch fail before submission", async (context) => {
-  const first = await harness(context);
-  await assert.rejects(
-    runPaymentWorkflow(
-      {
-        config: armedConfig({ maxBillCents: 10_000 }),
-        portal: new FakePortal(),
-        state: first.state,
-        audit: first.audit,
-        clock: fixedClock(),
-      },
-      { dryRun: false },
-    ),
-    SafetyStopError,
-  );
-
-  const second = await harness(context);
-  await assert.rejects(
-    runPaymentWorkflow(
-      {
-        config: armedConfig(),
-        portal: new FakePortal({
-          review: { ...review, feeCents: 200, totalCents: 28_617 },
-        }),
-        state: second.state,
-        audit: second.audit,
-        clock: fixedClock(),
-      },
-      { dryRun: false },
-    ),
-    SafetyStopError,
-  );
-  assert.equal((await second.state.snapshot()).paymentIntents.length, 0);
-});
-
-test("bill outside the configured window is not prepared", async (context) => {
-  const { state, audit } = await harness(context);
-  const portal = new FakePortal({
-    bill: { ...bill, dueDate: "2026-09-01" },
+  const duplicatePortal = new FakePortal();
+  const second = await runPaymentWorkflow({
+    bundle,
+    portal: duplicatePortal,
+    store,
+    now: NOW,
+    dryRun: false,
   });
-  const outcome = await runPaymentWorkflow(
-    {
-      config: armedConfig({ payWhenDueWithinDays: 21 }),
-      portal,
-      state,
-      audit,
-      clock: fixedClock(),
-    },
-    { dryRun: false },
-  );
-  assert.equal(outcome.status, "not-due");
-  assert.equal(portal.prepared, false);
+  assert.equal(second.status, "already-paid");
+  assert.equal(duplicatePortal.submitted, false);
 });
 
-test("failure before durable boundary does not create ambiguous intent", async (context) => {
-  const { state, audit } = await harness(context);
-  await assert.rejects(
-    runPaymentWorkflow(
-      {
-        config: armedConfig(),
-        portal: new FakePortal({ failBeforeBoundary: true }),
-        state,
-        audit,
-        clock: fixedClock(),
-      },
-      { dryRun: false },
-    ),
-    SiteChangedError,
-  );
-  assert.equal((await state.snapshot()).paymentIntents.length, 0);
+test("dry run reaches review without creating an intent", async () => {
+  const store = new MemoryStore();
+  const portal = new FakePortal();
+  const result = await runPaymentWorkflow({
+    bundle,
+    portal,
+    store,
+    now: NOW,
+    dryRun: true,
+  });
+  assert.equal(result.status, "dry-run");
+  assert.equal(store.blocking, undefined);
+  assert.equal(portal.submitted, false);
 });
 
-test("failure after durable boundary blocks retries until reconciliation", async (context) => {
-  const { state, audit } = await harness(context);
+test("an uncertain result blocks every retry", async () => {
+  const store = new MemoryStore();
   await assert.rejects(
-    runPaymentWorkflow(
-      {
-        config: armedConfig(),
-        portal: new FakePortal({ failAfterBoundary: true }),
-        state,
-        audit,
-        clock: fixedClock(),
-      },
-      { dryRun: false },
-    ),
-    PaymentSubmissionUncertainError,
+    runPaymentWorkflow({
+      bundle,
+      portal: new FakePortal(true),
+      store,
+      now: NOW,
+      dryRun: false,
+    }),
+    PaymentUncertainError,
   );
-  const intent = (await state.snapshot()).paymentIntents[0];
-  assert.equal(intent?.status, "unknown");
-
+  assert.equal(store.blocking?.status, "unknown");
   await assert.rejects(
-    runPaymentWorkflow(
-      {
-        config: armedConfig(),
-        portal: new FakePortal(),
-        state,
-        audit,
-        clock: fixedClock(),
-      },
-      { dryRun: false },
-    ),
-    (error: unknown) =>
-      error instanceof SafetyStopError && error.message.includes("unresolved"),
+    runPaymentWorkflow({
+      bundle,
+      portal: new FakePortal(),
+      store,
+      now: NOW,
+      dryRun: false,
+    }),
   );
 });

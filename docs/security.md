@@ -1,76 +1,74 @@
 # Security and threat model
 
-## Protected assets
+## Protected data
 
-- SCE authenticated session
-- Saved payment-method authorization
-- SCE account identity and bill data
-- Payment intent and confirmation history
-- The user's ability to prevent duplicate or excessive charges
+The guest bundle can contain:
+
+- SCE customer account number;
+- mailing ZIP;
+- payment-method last four;
+- tokenized cookies, local storage, IndexedDB, and session storage;
+- reviewed origin allowlists;
+- payment policy; and
+- optional webhook URL.
+
+The bundle is encrypted locally with AES-256-GCM. Cloudflare stores the
+ciphertext in the account Durable Object and the encryption key as a Worker
+secret.
+
+Raw primary account number, expiration, and card security code are outside the
+application boundary. They are entered into SCE's page during calibration and
+are not requested or extracted by `sce-pay`.
 
 ## Trust boundaries
 
-The user manually enters all credentials, MFA, CAPTCHA responses, and raw card
-data directly into the current SCE payment page. `sce-pay` controls a dedicated
-local browser profile after that manual setup. SCE remains the billing and payment system of record.
+- SCE and its current payment provider remain the billing and payment systems
+  of record.
+- Cloudflare executes the browser and holds the ciphertext, encryption secret,
+  administrator secret, and Durable Object state.
+- The local machine is required only for calibration and control.
+- The optional notification destination receives only sanitized status.
 
-The project does not operate a server, receive payment credentials, proxy
-traffic, or send telemetry. Desktop notifications contain only a short status
-message.
+Anyone with Cloudflare account administration can replace Worker code or
+secrets. Protect the Cloudflare account with strong MFA and least-privilege API
+tokens.
 
 ## Controls
 
-| Threat | Control |
-|---|---|
-| Repository or log leaks a card | Raw card fields are never accepted or filled; local data is ignored by Git and created with private permissions |
-| Wrong saved card | Last four must match on selection and review pages |
-| Wrong SCE account | Optional visible account label plus hashed account reference |
-| Unexpected large bill | Explicit `maxBillCents`; full amount must remain identical across inspection and review |
-| Changed or hidden fee | Exact fee equality and independent total arithmetic |
-| Duplicate charge | Durable bill fingerprint and confirmed-intent suppression |
-| Crash after final click | Pre-click intent, `unknown` status, global retry block, manual reconciliation |
-| Redirect or phishing page | HTTPS plus explicit host allowlist |
-| UI drift causes wrong click | Named semantic controls, review validation, and fail-closed missing/ambiguous selectors |
-| Concurrent scheduler/manual run | Exclusive local process lock |
-| Expired session or anti-bot challenge | Manual reauthentication; no CAPTCHA/MFA bypass |
-| Excessive automated traffic | One daily run, one browser context, no parallel scraping |
+- exact reviewed HTTPS origins;
+- no raw card handling;
+- hidden account and ZIP prompts;
+- AES-GCM bundle encryption before upload;
+- no secrets in Wrangler configuration;
+- administrator bearer authentication with hash-based constant-time compare;
+- Durable Object lease;
+- user bill ceiling;
+- fee strictly under the configured ceiling, never above `$4.00`;
+- full-balance and review-arithmetic verification;
+- due-window gate;
+- card-last-four binding;
+- durable intent before final click;
+- confirmed bill fingerprint;
+- ambiguous-result stop and manual reconciliation;
+- no CAPTCHA or authentication bypass;
+- no screenshots, HTML dumps, or sensitive telemetry.
 
-## Data handling
+## Local control file
 
-The browser profile is the most sensitive local artifact because it may contain
-authenticated cookies and payment-portal state. Protect the operating-system
-account with disk encryption and a screen lock. Do not put `SCE_PAY_HOME` in a
-shared folder or cloud-synced directory.
+`.sce-pay/control.json` contains the Worker URL and administrator token. It is
+created with private filesystem permissions and ignored by Git. It is not
+needed for Cron execution.
 
-State stores the saved card's last four digits, bill and fee amounts, due date,
-hashed account reference, and confirmation number. Audit events redact long
-numeric sequences and do not include DOM snapshots or screenshots.
+If it is disclosed, rotate `ADMIN_TOKEN` with Wrangler and replace the local
+file. If it is lost, the deployed Worker continues to run, but a new token is
+needed for control operations.
 
-No screenshot is captured by default. This is intentional: billing pages can
-display names, addresses, account numbers, usage data, and payment details.
+## Token limitations
 
-## Recovery
+Browser storage is not guaranteed to contain a reusable payment credential.
+Tokens may be short-lived, device-bound, IP-bound, or invalidated without
+notice. The mandatory cloud dry run prevents initial arming when the captured
+state is unusable. Later invalidation produces an attention-required stop.
 
-For `AUTH_REQUIRED` or `CAPTCHA_REQUIRED`, run `sce-pay login` and handle the
-request manually.
-
-For `PAYMENT_UNCERTAIN`:
-
-1. Do not rerun or delete state.
-2. Check SCE payment history.
-3. Check pending/posted card activity if SCE is inconclusive.
-4. Reconcile the exact intent as `paid` or `not-paid`, recording how it was
-   verified.
-
-For an unexpected host, do not broadly add `*` or a parent domain. Verify the
-destination through SCE's documented flow and add only the exact hostname.
-
-## Non-goals
-
-- Storing or tokenizing cards
-- Password-manager integration
-- CAPTCHA, MFA, rate-limit, or fraud-control bypass
-- Reverse engineering private payment APIs
-- Commercial percentage-fee support in the initial policy
-- Guaranteeing payment completion or replacing the user's responsibility to
-  monitor utility service and statements
+The project does not reverse-engineer, mint, refresh, or replay private payment
+API requests outside the browser.

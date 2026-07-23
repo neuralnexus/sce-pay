@@ -11,7 +11,9 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      WRANGLER_SEND_METRICS: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,6 +22,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - run: npm test
       - run: npm run build
-      - run: npm pack --dry-run
+      - run: npx wrangler deploy --dry-run --outdir .wrangler-dry-run
+      - run: npm audit --omit=dev

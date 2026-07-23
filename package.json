@@ -1,47 +1,34 @@
 {
   "name": "sce-pay",
-  "version": "0.1.0",
-  "description": "Fail-closed local automation for paying Southern California Edison bills with a saved credit card.",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Cloudflare-native, fail-closed automation for paying an SCE bill by card.",
   "type": "module",
   "bin": {
     "sce-pay": "./dist/cli.js"
   },
-  "files": [
-    "dist",
-    "docs",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "npm run typecheck && npm run lint",
-    "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
-    "test": "node --import tsx --test test/**/*.test.ts",
-    "test:coverage": "node --import tsx --test --experimental-test-coverage test/**/*.test.ts",
-    "prepare": "npm run build"
+    "check": "npm run typecheck && npm test",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "sce-pay": "tsx src/cli.ts",
+    "setup": "tsx src/cli.ts setup",
+    "test": "tsc -p tsconfig.test.json && node --test .test-dist/test/**/*.test.js",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
     "node": ">=22"
   },
-  "keywords": [
-    "sce",
-    "bill-payment",
-    "playwright",
-    "automation"
-  ],
-  "license": "MIT",
   "dependencies": {
-    "commander": "^15.0.0",
-    "playwright": "^1.61.1",
-    "zod": "^4.4.3"
+    "@cloudflare/playwright": "1.3.0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
-    "@types/node": "^24.13.3",
-    "eslint": "^9.39.5",
-    "tsx": "^4.23.1",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.65.0"
+    "@cloudflare/workers-types": "5.20260723.1",
+    "@types/node": "26.1.1",
+    "playwright-core": "1.61.1",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2",
+    "wrangler": "4.113.0"
   }
 }

@@ -1,10 +1,14 @@
 node_modules/
 dist/
+.test-dist/
 coverage/
 *.tgz
 .DS_Store
+.npm-cache/
+.wrangler-dry-run/
+.xdg-config/
 
-# Local browser sessions, configuration, logs, and audit data must never be committed.
+# Local onboarding control data contains an administrator token.
 .sce-pay/
 playwright-report/
 test-results/

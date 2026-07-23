@@ -1,108 +1,85 @@
 # Architecture
 
-## Design goal
+## Goal
 
-The project automates a narrow action—pay the full current SCE bill with a
-previously saved card—without becoming a credential vault or a generic payment
-bot. Correct behavior under uncertainty is more important than finishing a run.
+Run a low-frequency SCE Guest Pay browser workflow without making a laptop part
+of the production system. The design favors a visible stop over an uncertain
+payment.
+
+```mermaid
+flowchart TD
+    A["One-time local wizard"] -->|"encrypted bundle"| B["Cloudflare Worker"]
+    C["Daily Cron"] --> B
+    B --> D["Payment Durable Object"]
+    D --> E["Browser Run / SCE Guest Pay"]
+```
 
 ## Components
 
 | Component | Responsibility |
 |---|---|
-| CLI | Setup, explicit authorization, dry run, run, status, reconciliation, scheduler control |
-| Playwright portal adapter | Dedicated browser profile, semantic UI discovery, current SCE payment-route navigation, confirmation parsing |
-| Workflow | Due window, amount cap, fee arithmetic, account/card binding, idempotency, submission boundary |
-| State store | Atomic local JSON state for runs and payment intents |
-| Audit log | Append-only redacted operational events |
-| Scheduler | User-level launchd or systemd timer at 9:00 a.m. daily |
-| Desktop notifications | Best-effort success and attention notices |
+| Local wizard | Human-reviewed guest flow, tokenized storage capture, origin approval, policy prompts, encryption, deployment, cloud dry run |
+| Worker | Bearer-authenticated control API, Cron entrypoint, routing to the single account object |
+| Durable Object | Strong run serialization, encrypted bundle storage, arming, payment intents, bill-cycle idempotency, reconciliation |
+| Browser Run adapter | Restore tokenized state, enter guest account details, read the bill, select the saved/tokenized method, verify review, submit |
+| Policy engine | Bill ceiling, due window, last-four binding, fee ceiling, review arithmetic |
 
-## Current payment target
+## Why Cloudflare
 
-The adapter enters at
-`https://www.sce.com/mysce/billsnpayments/paybills`. Before final submission,
-the top-level page must stay on `www.sce.com` and at that path (or one of its
-subroutes). Query strings and fragments are allowed; unrelated SCE paths,
-popups, and every external payment-portal hostname fail closed.
+Cloudflare Browser Run supports Playwright inside Workers, Cron Triggers invoke a
+Worker on a schedule, and Durable Objects provide a strongly consistent
+coordination boundary. No always-on server or workstation scheduler is needed.
 
-This route contract is intentionally independent of the underlying card
-processor. A future redirect is treated as a site change, not automatically
-learned or added to the allowlist. Updating the target requires a code review,
-new deterministic fixtures, and a successful headed dry run.
+The deployment uses:
 
-## Payment state machine
+- `@cloudflare/playwright`;
+- a Browser Run binding named `BROWSER`;
+- one SQLite-backed Durable Object class named `PaymentAccount`;
+- a daily `0 17 * * *` UTC Cron; and
+- Worker secrets `BUNDLE_KEY` and `ADMIN_TOKEN`.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Inspect
-    Inspect --> Skip: No bill / too early / duplicate
-    Inspect --> Review: Eligible bill
-    Review --> Stop: Any mismatch
-    Review --> DryRun: Submission disabled
-    Review --> Submitting: Persist intent
-    Submitting --> Confirmed: Confirmation captured
-    Submitting --> Unknown: Result ambiguous
-    Unknown --> Confirmed: User verifies paid
-    Unknown --> Cancelled: User verifies not paid
-    Cancelled --> Inspect: Future retry allowed
-```
+## Onboarding data path
 
-The durable intent is written by a callback after the portal has found an
-unambiguous final control and immediately before that control is activated.
-Failures before the callback are safe to retry. Failures after it are ambiguous
-and block every future submission.
+The local browser is the only place where the user enters card fields. At the
+final review, the wizard captures browser storage state, per-origin session
+storage, navigation origins, and frame origins. It then asks separately for
+guest account identifiers and deterministic payment limits.
 
-## Idempotency
+The complete bundle is encrypted locally with a fresh 256-bit AES-GCM key. Only
+ciphertext is uploaded to the Durable Object. The key is installed as a
+non-readable Worker secret. The local control file contains only the deployed
+URL and administrator token.
 
-The bill-cycle fingerprint is:
+## Run sequence
 
-```text
-SHA-256("sce-pay-intent-v1" + accountReference + dueDate + amountCents)
-```
+1. Cron requests a real run from the account Durable Object.
+2. The object rejects a concurrent lease or unresolved intent.
+3. It decrypts and validates the guest bundle.
+4. Browser Run restores captured browser state and enters the account number and
+   mailing ZIP in Guest Pay.
+5. The adapter reads amount due and due date.
+6. The policy engine checks amount and due window.
+7. A bill fingerprint checks the confirmed-payment index.
+8. The adapter selects the tokenized method and reaches review.
+9. Policy verifies account reference, amount, due date, last four, fee under
+   $4, and total arithmetic.
+10. The object persists a `submitting` intent.
+11. The adapter activates the exact final-payment control once.
+12. A recognized SCE confirmation changes the intent to `confirmed`.
 
-`accountReference` is itself an irreversible truncated hash of the configured
-account label or masked account identifier. Raw SCE account numbers are not
-written to state or audit files.
+Any exception after step 10 changes the intent to `unknown`. That state blocks
+all automatic runs until manual reconciliation.
 
-A confirmed matching fingerprint is skipped. An `unknown` or `submitting`
-intent blocks all payments, even if a newly observed fingerprint differs. This
-global block is intentional: a user must establish what happened before the
-agent can safely move money again.
+## State
 
-## Live portal adapter
+The Durable Object stores:
 
-Selectors are ordered from semantic and stable to heuristic:
+- the encrypted onboarding bundle;
+- `configured` and `armed` flags;
+- a short run lease;
+- payment intents;
+- a confirmed fingerprint index;
+- the latest sanitized run record.
 
-1. Accessible roles and names documented by SCE, such as **Pay by Card**, **Continue**, and **Confirm Payment**.
-2. Associated form labels for payment amount and saved methods.
-3. Text extraction scoped to labels such as **Current Amount Due**,
-   **Convenience Fee**, and **Total Payment**.
-
-The adapter reads same-origin and embedded frames but does not inject scripts,
-call private APIs, reverse engineer bundled code, or bypass challenges.
-
-Before continuing across a navigation, the adapter requires HTTPS and a host
-matching `allowedHosts`. Wildcards match subdomains only, not lookalike suffixes.
-
-## Extension points
-
-Keep provider-specific behavior behind `PortalClient`. A future supported SCE
-API or a different browser layout can implement:
-
-```ts
-type PortalClient = {
-  inspectBill(): Promise<BillSnapshot | null>;
-  preparePayment(
-    bill: BillSnapshot,
-    paymentMethodLast4: string,
-  ): Promise<PaymentReview>;
-  submitPayment(
-    onWillSubmit: () => Promise<void>,
-  ): Promise<PaymentConfirmation>;
-  close(): Promise<void>;
-};
-```
-
-Do not move amount, fee, duplicate, or ambiguous-result decisions into a portal
-adapter. Those invariants belong to the deterministic workflow.
+It does not store plaintext account identifiers, raw card data, browser
+screenshots, page HTML, or request/response payloads.
