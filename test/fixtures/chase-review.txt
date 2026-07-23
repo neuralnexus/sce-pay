@@ -1,0 +1,8 @@
+Review Payment
+Payment Method
+Visa ending in 4242
+Payment Amount: $284.17
+Convenience Fee (non-refundable): $1.65
+Total Payment
+$285.82
+Confirm Payment

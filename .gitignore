@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+.DS_Store
+
+# Local browser sessions, configuration, logs, and audit data must never be committed.
+.sce-pay/
+playwright-report/
+test-results/
