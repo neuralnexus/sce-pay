@@ -56,16 +56,7 @@ export function defaultConfig(): AppConfig {
   return {
     version: 1,
     startUrl: "https://www.sce.com/mysce/billsnpayments/paybills",
-    allowedHosts: [
-      "sce.com",
-      "*.sce.com",
-      "chase.com",
-      "*.chase.com",
-      "jpmorgan.com",
-      "*.jpmorgan.com",
-      "jpmorganchase.com",
-      "*.jpmorganchase.com",
-    ],
+    allowedHosts: ["www.sce.com"],
     browser: {
       channel: "chrome",
       headless: true,

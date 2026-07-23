@@ -11,12 +11,25 @@ bot. Correct behavior under uncertainty is more important than finishing a run.
 | Component | Responsibility |
 |---|---|
 | CLI | Setup, explicit authorization, dry run, run, status, reconciliation, scheduler control |
-| Playwright portal adapter | Dedicated browser profile, semantic UI discovery, SCE/Chase navigation, confirmation parsing |
+| Playwright portal adapter | Dedicated browser profile, semantic UI discovery, current SCE payment-route navigation, confirmation parsing |
 | Workflow | Due window, amount cap, fee arithmetic, account/card binding, idempotency, submission boundary |
 | State store | Atomic local JSON state for runs and payment intents |
 | Audit log | Append-only redacted operational events |
 | Scheduler | User-level launchd or systemd timer at 9:00 a.m. daily |
 | Desktop notifications | Best-effort success and attention notices |
+
+## Current payment target
+
+The adapter enters at
+`https://www.sce.com/mysce/billsnpayments/paybills`. Before final submission,
+the top-level page must stay on `www.sce.com` and at that path (or one of its
+subroutes). Query strings and fragments are allowed; unrelated SCE paths,
+popups, and every external payment-portal hostname fail closed.
+
+This route contract is intentionally independent of the underlying card
+processor. A future redirect is treated as a site change, not automatically
+learned or added to the allowlist. Updating the target requires a code review,
+new deterministic fixtures, and a successful headed dry run.
 
 ## Payment state machine
 
@@ -61,8 +74,7 @@ agent can safely move money again.
 
 Selectors are ordered from semantic and stable to heuristic:
 
-1. Accessible roles and names documented by SCE, such as **Pay by Card**,
-   **Pay Bill**, **Continue**, and **Confirm Payment**.
+1. Accessible roles and names documented by SCE, such as **Pay by Card**, **Continue**, and **Confirm Payment**.
 2. Associated form labels for payment amount and saved methods.
 3. Text extraction scoped to labels such as **Current Amount Due**,
    **Convenience Fee**, and **Total Payment**.

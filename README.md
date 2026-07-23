@@ -5,14 +5,14 @@ California Edison's payment options: SCE accepts credit cards, but its Auto Pay
 feature only supports a checking account.
 
 The agent checks the current bill once a day and, when explicitly armed, pays
-the **entire current amount due** with a card already saved in SCE's JP Morgan
-Chase payment portal. It does not ask for, store, or type an SCE password, card
+the **entire current amount due** with a card available in SCE's current
+payment experience. It does not ask for, store, or type an SCE password, card
 number, CVV, MFA code, or CAPTCHA response.
 
-> **Project status:** early and deliberately conservative. SCE and Chase can
-> change their pages without notice. Always complete a headed dry run after
-> setup or an SCE page change. This project is independent of and not endorsed
-> by Southern California Edison or JP Morgan Chase.
+> **Project status:** early and deliberately conservative. SCE can change its
+> pages without notice. Always complete a headed dry run after setup or an SCE
+> page change. This project is independent of and not endorsed by Southern
+> California Edison.
 
 ## What is automated
 
@@ -31,15 +31,14 @@ The default run:
    submission control.
 8. Captures the confirmation number and suppresses duplicate payment attempts.
 
-SCE currently documents a **$1.65 residential convenience fee** per card or
-digital-wallet transaction. Business customers are documented at 2.15%, so the
-default configuration is intended for residential accounts. The fee is an
-exact safety constraint: if it changes, the agent stops until the user reviews
-and explicitly re-authorizes it.
+A new residential configuration starts with a **$1.65 expected fee**. That is
+only a safety constraint, not a trusted fact: the live SCE review page is
+authoritative. If the displayed fee differs, the agent stops until the user
+reviews and explicitly re-authorizes the new exact amount.
 
 Official references:
 
-- [SCE card and digital-wallet payment guide](https://www.sce.com/customer-service-center/help-center/billing-payments/paying-your-bill/card-digital-wallet-payment)
+- [Current SCE payment route](https://www.sce.com/mysce/billsnpayments/paybills)
 - [SCE electronic payment options](https://www.sce.com/factsheet/paymentoptions)
 - [SCE website terms of use](https://www.sce.com/terms-conditions/website-terms-of-use)
 
@@ -56,8 +55,10 @@ Official references:
   payment run stops until the user checks SCE payment history and reconciles it.
 - **Bill-cycle idempotency.** A hash of the account reference, due date, and
   full amount prevents a confirmed bill from being paid twice.
-- **Approved HTTPS hosts only.** Unexpected redirects stop the run. A new host
-  must be manually verified before it is allowlisted.
+- **Current SCE route only.** Until final submission, the top-level page must
+  remain under `https://www.sce.com/mysce/billsnpayments/paybills`. Any
+  external redirect or unrelated SCE route stops the run and requires a
+  reviewed adapter update.
 - **No challenge bypass.** Expired login sessions, MFA, CAPTCHA, maintenance,
   changed labels, missing values, or mismatched arithmetic all require attention.
 - **Low frequency.** The scheduler checks once daily, with no scraping loop or
@@ -104,7 +105,7 @@ In that browser window:
 
 1. Sign in to SCE yourself.
 2. Open **Make a Payment → Pay by Card**.
-3. Add or select the desired card directly in the SCE/Chase UI.
+3. Add or select the desired card directly in the SCE UI.
 4. Stop before submitting a real payment.
 5. Return to the terminal and press Enter.
 
@@ -189,7 +190,7 @@ Important files:
 - `config.json` — authorization limits and non-secret settings
 - `state.json` — runs, durable intents, and confirmations
 - `audit.jsonl` — append-only operational events with long numbers redacted
-- `browser-profile/` — the local SCE/Chase browser session
+- `browser-profile/` — the local SCE browser session
 
 Back up or sync these files only to a location you trust. Never commit them.
 
@@ -202,7 +203,7 @@ Useful configuration fields:
 | `automation.payWhenDueWithinDays` | `21` | Earliest point at which a bill can be paid |
 | `automation.accountLabel` | `null` | Optional visible text binding a specific SCE account |
 | `browser.channel` | `chrome` | `chrome`, `msedge`, or installed `chromium` |
-| `allowedHosts` | SCE/Chase only | HTTPS destinations accepted during the flow |
+| `allowedHosts` | Current SCE route only | HTTPS destinations accepted during the flow |
 
 ## Development
 
@@ -231,6 +232,5 @@ boundary or portal selectors.
   supported recovery path.
 - The tool does not guarantee timely payment. The customer remains responsible
   for checking their bill, payment status, card availability, and due date.
-- Users are responsible for confirming that their use complies with SCE,
-  Chase, card-issuer, and applicable terms. The implementation intentionally
+- Users are responsible for confirming that their use complies with SCE, card-issuer, and applicable terms. The implementation intentionally
   avoids high-frequency access and prohibited challenge bypass.

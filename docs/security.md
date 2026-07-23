@@ -11,9 +11,8 @@
 ## Trust boundaries
 
 The user manually enters all credentials, MFA, CAPTCHA responses, and raw card
-data directly into SCE or JP Morgan Chase pages. `sce-pay` controls a dedicated
-local browser profile after that manual setup. SCE and Chase remain the payment
-systems of record.
+data directly into the current SCE payment page. `sce-pay` controls a dedicated
+local browser profile after that manual setup. SCE remains the billing and payment system of record.
 
 The project does not operate a server, receive payment credentials, proxy
 traffic, or send telemetry. Desktop notifications contain only a short status

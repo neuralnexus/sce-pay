@@ -35,9 +35,39 @@ test("payment URLs must use HTTPS and an allowed host", () => {
   );
 });
 
+test("current SCE payment route rejects legacy or unrelated destinations", () => {
+  assert.equal(
+    portalInternals.isScePaymentRoute(
+      "https://www.sce.com/mysce/billsnpayments/paybills",
+    ),
+    true,
+  );
+  assert.equal(
+    portalInternals.isScePaymentRoute(
+      "https://www.sce.com/mysce/billsnpayments/paybills/review?step=2",
+    ),
+    true,
+  );
+  assert.equal(
+    portalInternals.isScePaymentRoute("https://www.sce.com/my-account"),
+    false,
+  );
+  assert.equal(
+    portalInternals.isScePaymentRoute("https://payments.example.test/pay"),
+    false,
+  );
+  assert.throws(
+    () =>
+      portalInternals.assertScePaymentRoute(
+        "https://payments.example.test/pay",
+      ),
+    SafetyStopError,
+  );
+});
+
 test("labeled values are parsed from a deterministic review fixture", async () => {
   const text = await readFile(
-    new URL("./fixtures/chase-review.txt", import.meta.url),
+    new URL("./fixtures/sce-payment-review.txt", import.meta.url),
     "utf8",
   );
   assert.equal(portalInternals.labeledMoney(text, ["payment amount"]), 28_417);

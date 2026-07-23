@@ -50,7 +50,7 @@ export class AuthenticationRequiredError extends ScePayError {
 
 export class CaptchaRequiredError extends ScePayError {
   constructor() {
-    super("CAPTCHA_REQUIRED", "SCE or its payment processor requested a CAPTCHA.", {
+    super("CAPTCHA_REQUIRED", "SCE's current payment flow requested a CAPTCHA.", {
       remediation:
         "Run `sce-pay login` and complete the challenge manually. CAPTCHA bypass is intentionally unsupported.",
     });

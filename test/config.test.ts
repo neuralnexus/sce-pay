@@ -33,6 +33,11 @@ test("configuration initializes disabled and round trips", async (context) => {
   assert.equal(config.automation.enabled, false);
   assert.equal(config.automation.mode, "observe");
   assert.equal(config.automation.expectedFeeCents, 165);
+  assert.equal(
+    config.startUrl,
+    "https://www.sce.com/mysce/billsnpayments/paybills",
+  );
+  assert.deepEqual(config.allowedHosts, ["www.sce.com"]);
 
   if (process.platform !== "win32") {
     const mode = (await stat(paths.configFile)).mode & 0o777;

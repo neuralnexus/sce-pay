@@ -96,9 +96,51 @@ function assertAllowedUrl(url: string, allowedHosts: string[]): void {
   ) {
     throw new SafetyStopError(
       `Stopped at unapproved payment host "${parsed.hostname}".`,
-      "Verify the host belongs to SCE or JP Morgan Chase, then add only that exact host to allowedHosts.",
+      "The current release authorizes only SCE's reviewed payment route. Do not add an external payment host without updating and testing the portal adapter.",
     );
   }
+}
+
+const SCE_PAYMENT_HOST = "www.sce.com";
+const SCE_PAYMENT_PATH = "/mysce/billsnpayments/paybills";
+
+function isScePaymentRoute(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  const pathname = parsed.pathname.replace(/\/+$/, "");
+  return (
+    parsed.protocol === "https:" &&
+    (parsed.port === "" || parsed.port === "443") &&
+    parsed.username === "" &&
+    parsed.password === "" &&
+    parsed.hostname.toLowerCase() === SCE_PAYMENT_HOST &&
+    (pathname === SCE_PAYMENT_PATH ||
+      pathname.startsWith(`${SCE_PAYMENT_PATH}/`))
+  );
+}
+
+function assertScePaymentRoute(url: string): void {
+  if (isScePaymentRoute(url)) {
+    return;
+  }
+
+  let destination = "an invalid URL";
+  try {
+    const parsed = new URL(url);
+    destination = `${parsed.hostname}${parsed.pathname}`;
+  } catch {
+    // Keep the redacted fallback; never include an invalid raw URL in logs.
+  }
+
+  throw new SafetyStopError(
+    `Stopped outside the current SCE payment route (${destination}).`,
+    `This release targets https://${SCE_PAYMENT_HOST}${SCE_PAYMENT_PATH}. Any redirect or route change requires a reviewed adapter update and a new headed dry run.`,
+  );
 }
 
 async function firstVisible(locators: Locator[]): Promise<Locator | null> {
@@ -263,7 +305,7 @@ async function detectInterruption(page: Page): Promise<void> {
     )
   ) {
     throw new SiteChangedError(
-      "SCE or its payment processor is temporarily unavailable.",
+      "SCE or its SCE payment form is temporarily unavailable.",
       "The scheduler will try again on its next run.",
     );
   }
@@ -307,6 +349,8 @@ async function namedControl(
     const result = await firstVisible([
       frame.getByRole("button", { name: names }),
       frame.getByRole("link", { name: names }),
+      frame.getByRole("radio", { name: names }),
+      frame.getByRole("tab", { name: names }),
       frame.locator('input[type="submit"]').filter({ hasText: names }),
     ]);
     if (result !== null) {
@@ -374,6 +418,7 @@ export class PlaywrightScePortal implements PortalClient {
       page,
       config.browser.navigationTimeoutMs,
     );
+    assertScePaymentRoute(page.url());
 
     if (/no (?:payment|balance) (?:is )?due|amount due\s*:?\s*\$0\.00/i.test(initialText)) {
       return null;
@@ -386,54 +431,23 @@ export class PlaywrightScePortal implements PortalClient {
       config.automation.accountLabel,
     );
 
-    const paymentEntry = await namedControl(
+    let paymentText = initialText;
+    const paymentMode = await namedControl(
       page,
-      /pay by card|card or digital wallet/i,
+      /pay by card|card or digital wallet|credit or debit card|debit or credit card/i,
     );
-    if (paymentEntry !== null) {
-      this.#page = await transitionAfterClick(this.#context, page, paymentEntry);
-    } else {
-      const makePayment = await namedControl(page, /make a payment/i);
-      if (makePayment !== null) {
-        this.#page = await transitionAfterClick(this.#context, page, makePayment);
-        const cardEntry = await namedControl(
-          this.#page,
-          /pay by card|card or digital wallet/i,
-        );
-        if (cardEntry === null) {
-          throw new SiteChangedError(
-            'Could not find SCE\'s documented "Pay by Card" control.',
-          );
-        }
-        this.#page = await transitionAfterClick(
-          this.#context,
-          this.#page,
-          cardEntry,
-        );
-      }
-    }
-
-    assertAllowedUrl(this.#page.url(), config.allowedHosts);
-    let paymentText = await waitForApplication(
-      this.#page,
-      config.browser.navigationTimeoutMs,
-    );
-    const payBill = await namedControl(this.#page, /^pay bill$/i);
-    if (payBill !== null) {
-      this.#page = await transitionAfterClick(this.#context, this.#page, payBill);
+    if (paymentMode !== null) {
+      this.#page = await transitionAfterClick(
+        this.#context,
+        page,
+        paymentMode,
+      );
       assertAllowedUrl(this.#page.url(), config.allowedHosts);
       paymentText = await waitForApplication(
         this.#page,
         config.browser.navigationTimeoutMs,
       );
-    }
-
-    if (
-      /no (?:payment|balance) (?:is )?due|amount due\s*:?\s*\$0\.00/i.test(
-        paymentText,
-      )
-    ) {
-      return null;
+      assertScePaymentRoute(this.#page.url());
     }
 
     amountCents ??= labeledMoney(paymentText, AMOUNT_LABELS);
@@ -522,7 +536,7 @@ export class PlaywrightScePortal implements PortalClient {
       const inputAmount = parseMoneyToCents(await amountInput.inputValue());
       if (inputAmount !== bill.amountCents) {
         throw new SafetyStopError(
-          "The payment processor did not default to the full current amount due.",
+          "The SCE payment form did not default to the full current amount due.",
         );
       }
     } else {
@@ -554,6 +568,7 @@ export class PlaywrightScePortal implements PortalClient {
       this.#page,
       config.browser.navigationTimeoutMs,
     );
+    assertScePaymentRoute(this.#page.url());
     await detectInterruption(this.#page);
 
     if (!cardPattern.test(text)) {
@@ -591,6 +606,7 @@ export class PlaywrightScePortal implements PortalClient {
     }
 
     await detectInterruption(page);
+    assertScePaymentRoute(page.url());
     const submit = await namedControl(
       page,
       /^(?:submit payment|confirm payment|complete payment|pay now|pay \$?[\d,.]+)$/i,
@@ -683,8 +699,10 @@ export async function openInteractiveSceSession(
 
 export const portalInternals = {
   assertAllowedUrl,
+  assertScePaymentRoute,
   extractDueDate,
   hostMatches,
+  isScePaymentRoute,
   isoDate,
   labeledMoney,
   safeAccountReference,

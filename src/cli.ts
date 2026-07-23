@@ -131,7 +131,7 @@ function buildProgram(): Command {
   program
     .name("sce-pay")
     .description(
-      "Safely automate the full current SCE bill using a card saved directly with SCE/Chase.",
+      "Safely automate the full current SCE bill using a card saved directly with SCE.",
     )
     .version("0.1.0");
 
@@ -151,7 +151,7 @@ function buildProgram(): Command {
     .action(async () => {
       const config = await loadConfig(paths);
       print(
-        "Complete SCE sign-in and save/select your card directly in the SCE/Chase pages.",
+        "Complete SCE sign-in and save/select your card directly in the current SCE payment page.",
       );
       print("sce-pay never asks for or fills card numbers, passwords, MFA, or CAPTCHA.");
       const context = await openInteractiveSceSession({ config, paths });
@@ -256,7 +256,7 @@ function buildProgram(): Command {
         .makeOptionMandatory(),
     )
     .requiredOption("--note <text>", "how the result was verified")
-    .option("--confirmation <number>", "SCE/Chase confirmation number")
+    .option("--confirmation <number>", "SCE confirmation number")
     .action(
       async (
         intentId: string,
