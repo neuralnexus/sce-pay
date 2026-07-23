@@ -1,30 +1,46 @@
 # Payment target contract
 
-The entry URL is:
+The only supported top-level application is:
 
 ```text
-https://www.sce.com/mysce/billsnpayments/paybills
+origin: https://www.sce.com
+path:   /mysce/billsnpayments/paybills
 ```
 
-The automation uses the Guest Pay path reached from this page. It does not use
-the retired legacy external card portal and does not require an SCE username,
-password, MFA session, or authenticated My Account profile.
+Query strings and child paths under that application are allowed. Other SCE
+paths and all external top-level portals are rejected. The automation uses
+Guest Pay with account number and mailing ZIP; it does not require an SCE
+username, password, MFA session, or authenticated My Account profile.
 
-Because SCE's public help pages have historically lagged the live application,
-the adapter does not hard-code an external processor name. Onboarding records
-the exact HTTPS origins that the user personally reviews during the current
-guest flow.
+SCE's public help content has historically lagged its live application. An
+external processor name is therefore not a code contract or fallback.
 
-Runtime rules:
+## Calibration contract
 
-1. Start at the configured SCE URL.
-2. Permit only top-level origins approved during onboarding.
-3. Permit embedded payment frames only from approved origins.
-4. Reject popups.
-5. Stop on CAPTCHA, login requests, maintenance, missing labels, missing saved
-   method, changed review arithmetic, or an unknown confirmation.
-6. Never learn a new origin during an unattended run.
-7. Never fill raw card fields.
+Onboarding records:
 
-A payment-origin change is a new onboarding event, not an automatic allowlist
-update.
+- the single SCE top-level origin;
+- external frame origins visible in the reviewed payment UI; and
+- every HTTPS request origin used by the reviewed flow.
+
+The runtime restores exactly that contract before navigation. Requests to new
+origins are aborted; new frame origins, WebSockets, popups, dialogs, downloads,
+and top-level routes stop the run. It never learns an origin while unattended.
+
+## Semantic contract
+
+The adapter uses accessible roles and labels rather than CSS class names, but
+does not accept ambiguity. It requires:
+
+- a recognizable Guest Pay account/ZIP flow;
+- current amount due and due date;
+- full-balance/card selection;
+- one displayed card ending;
+- labeled payment amount, fee, and total;
+- one enabled final-payment action; and
+- success text plus a confirmation/reference/receipt identifier.
+
+Before the durable intent and again immediately before the final click, the
+review must match. No raw card field is ever filled by the unattended adapter.
+
+A target or origin change is a new human-reviewed onboarding event.

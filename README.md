@@ -1,19 +1,14 @@
 # SCE Pay
 
-`sce-pay` pays the entire current Southern California Edison bill through SCE
-Guest Pay from a Cloudflare Worker. After one guided setup, Cloudflare Cron and
-Browser Run perform the monthly payment check; your computer can be off.
+`sce-pay` automates paying the entire current Southern California Edison bill by
+card through SCE Guest Pay. A one-time local wizard calibrates the live flow and
+deploys a Cloudflare Worker; Cloudflare Cron, Browser Run, and a Durable Object
+then operate without a computer left online.
 
-This project exists because SCE accepts cards but does not offer card Auto Pay.
-It is independent of and not endorsed by Southern California Edison or
+The project is independent of and not endorsed by Southern California Edison or
 Cloudflare.
 
-> **Early release:** SCE does not provide a public card-payment API for this
-> project. The browser adapter must fail closed when SCE changes the guest flow,
-> rejects a cloud browser, requests a CAPTCHA, or invalidates the tokenized
-> payment state. You remain responsible for confirming bills and payments.
-
-## The short version
+## Install
 
 ```bash
 git clone https://github.com/neuralnexus/sce-pay.git
@@ -23,128 +18,137 @@ npx wrangler login
 npm run setup
 ```
 
-The setup wizard:
+The wizard performs a preflight, opens the current SCE Guest Pay route in local
+Chrome, and asks you to stop at the final review without submitting. It then:
 
-1. Opens SCE Guest Pay in Chrome.
-2. Asks you to reach the final payment review without submitting.
-3. Captures tokenized browser state and the exact HTTPS origins you approve.
-4. Asks for the SCE account number, mailing ZIP, card last four, bill ceiling,
-   and due-window policy.
-5. Encrypts that bundle locally and deploys a disarmed Cloudflare Worker.
-6. Runs a real Cloudflare Browser Run dry run.
-7. Arms the daily Cron only if the cloud dry run reaches a valid review.
+1. proves the reviewed card ending from the page rather than trusting typed
+   digits;
+2. captures tokenized browser state and every HTTPS page, frame, and network
+   origin;
+3. asks you to approve that exact origin set;
+4. collects the SCE account number, mailing ZIP, bill ceiling, due window, and
+   optional notification webhook;
+5. encrypts the bundle locally with authenticated AES-256-GCM;
+6. deploys the Worker and both secrets in one version, initially disarmed;
+7. uploads the ciphertext and runs the complete review in Cloudflare Browser
+   Run; and
+8. arms only that exact Worker release and configuration after the cloud dry run
+   succeeds.
 
 Card number, expiration, and security code are entered only into SCE's page.
-`sce-pay` does not read, prompt for, persist, or log raw card fields.
+`sce-pay` does not prompt for, extract, persist, log, or transmit raw card
+fields.
 
-## What runs in Cloudflare
+## Runtime
 
-- A Worker receives Cron and authenticated control requests.
-- Browser Run executes the current SCE Guest Pay flow with Cloudflare's
-  Playwright runtime.
-- A single Durable Object serializes every run and stores payment intents.
-- The onboarding bundle is AES-256-GCM encrypted before upload. The Durable
-  Object stores ciphertext; the encryption key is a Worker secret.
-- Cron checks once daily. Idempotency permits at most one confirmed payment for
-  an exact account, due date, and amount.
+- `0 17 * * *` Cron wakes the Worker daily in UTC.
+- The Durable Object defers Browser Run until a meaningful check is due, so
+  "daily Cron" does not mean "open a browser daily."
+- Browser Run starts only at
+  `https://www.sce.com/mysce/billsnpayments/paybills`.
+- Top-level navigation must remain in that SCE application. The retired external
+  portal is never an allowed top-level fallback.
+- Frames, requests, and WebSockets must match the onboarding allowlist exactly.
+- Browser state is refreshed and re-encrypted after safe runs when possible.
+- Deploying new code or secrets changes the Worker version and automatically
+  invalidates the prior arm state.
 
-Cloudflare currently documents Browser Run on Free and Paid Workers plans. The
-Free plan includes ten browser minutes per day, which is normally enough for
-this single low-frequency workflow. Review Cloudflare's current
-[Browser Run limits](https://developers.cloudflare.com/browser-run/limits/) and
-[pricing](https://developers.cloudflare.com/browser-run/pricing/) for your
-account.
+Cloudflare documents Browser Run support and current limits at
+[Playwright](https://developers.cloudflare.com/browser-run/playwright/) and
+[Browser Run limits](https://developers.cloudflare.com/browser-run/limits/).
 
-## Payment policy
+## Payment authorization
 
-Every real submission requires all of these checks to pass:
+Every real submission requires:
 
-- the bill is the entire current amount due;
-- the amount is at or below the user-authorized bill ceiling;
-- the bill is inside the configured due window;
-- the review still shows the authorized card's last four digits;
-- the convenience fee is **strictly less than $4.00**;
-- `bill amount + fee = displayed total`;
-- the top-level and embedded payment origins exactly match the origins approved
-  during onboarding;
-- no prior confirmed payment exists for that exact bill cycle; and
-- no earlier submission has an unresolved result.
+- a current, plausible SCE bill cycle;
+- the entire current amount due;
+- an amount at or below the configured bill ceiling;
+- a due date inside the configured payment window;
+- the same account, amount, due date, and card ending at bill and review;
+- a convenience fee **strictly below `$4.00`**;
+- exact `bill amount + fee = displayed total` arithmetic;
+- one unique, enabled final-payment control;
+- the reviewed route and origin contract;
+- no confirmed fingerprint for the same account, due date, and amount; and
+- no unresolved earlier submission.
 
-The `$1.65` exact-fee assumption has been removed.
+The old exact `$1.65` assumption is gone.
 
-Immediately before the final click, the Durable Object writes a `submitting`
-intent. If SCE does not return a recognizable confirmation, that intent becomes
-`unknown` and every later run stops. There is no blind retry.
+Immediately before the one final click, the Durable Object revalidates its
+exclusive lease and writes a durable `submitting` intent in the same serialized
+state boundary. A recognizable SCE confirmation makes that intent `confirmed`.
+Any ambiguous post-click result becomes `unknown`, disarms useful progress, and
+blocks every automatic retry until manual reconciliation.
 
-## Operations
+## Operate
 
-The wizard creates `.sce-pay/control.json` with a private administrator token.
-That local file is only for status and manual control; deleting it or turning
-off the computer does not stop the deployed Cron.
+`.sce-pay/control.json` contains the deployed URL and a private administrator
+token. It is not used by Cron; the computer can be off or the file can be
+deleted without stopping scheduled execution.
 
 ```bash
-# Sanitized status
+npm run sce-pay -- doctor
 npm run sce-pay -- status
-
-# Cloud dry run; never submits
 npm run sce-pay -- dry-run
-
-# Temporarily disable or re-enable submission
 npm run sce-pay -- disarm
-npm run sce-pay -- arm
-
-# Deliberate manual real run
-npm run sce-pay -- run --yes
+npm run sce-pay -- arm       # performs a fresh dry run first
+npm run sce-pay -- run --yes # deliberate real run
 ```
 
-After checking SCE and the card account, reconcile an uncertain intent:
+After independently checking SCE and the card account, reconcile an uncertain
+intent:
 
 ```bash
 npm run sce-pay -- reconcile INTENT_ID paid "Verified in SCE payment history"
 npm run sce-pay -- reconcile INTENT_ID not-paid "Verified absent from SCE and card activity"
 ```
 
-Re-running `npm run setup` replaces the encrypted guest bundle and starts
-disarmed until a new cloud dry run succeeds. Use that when SCE changes the flow
-or the tokenized payment method expires.
+Read the [operations runbook](docs/operations.md) before reconciling or rotating
+configuration.
 
 ## Notifications
 
-The wizard optionally accepts an HTTPS webhook. The Worker sends a small JSON
-success or attention-required event after each eligible run. It never includes
-the SCE account number, mailing ZIP, card token, card last four, bill amount, or
-confirmation number.
+An optional HTTPS webhook receives only `payment-confirmed` and
+`attention-required` events. It never receives the account number, ZIP, card
+token, card ending, bill amount, fee, or confirmation number.
+
+Events include an ID and timestamp and are signed as:
+
+```text
+X-SCE-Pay-Signature: v1=BASE64URL(HMAC_SHA256(secret, timestamp + "." + body))
+```
+
+The wizard prints the signing secret once. Delivery has a five-second timeout,
+one bounded retry, and cannot change a payment result.
 
 ## Development
 
 ```bash
-npm run check
-npm run build
-npx wrangler deploy --dry-run
-npm audit --omit=dev
+npm ci
+npm run validate
+npm audit --audit-level=high
 ```
 
-The deterministic suite covers the strict sub-$4 fee rule, bill ceiling and due
-window, review arithmetic, exact-origin restrictions, encryption, duplicate
-suppression, dry runs, and uncertain-submission blocking.
+The gate runs formatting/lint rules, strict TypeScript, deterministic tests,
+the production build, a Wrangler bundle dry run, and package-content
+inspection. CI runs the same gate on Node.js 24.
 
-Read [Architecture](docs/architecture.md),
-[Onboarding](docs/onboarding.md), [Payment target](docs/payment-target.md), and
-[Security](docs/security.md) before changing the browser or submission boundary.
+See [architecture](docs/architecture.md),
+[onboarding](docs/onboarding.md),
+[payment target](docs/payment-target.md), and
+[security](docs/security.md).
 
-## Current limitations
+## Deployment qualification
 
-- A token available at guest review may expire or may not be reusable from
-  Cloudflare. The mandatory cloud dry run proves the captured state before the
-  Worker can be armed, but it cannot guarantee that SCE will keep it valid.
-- SCE may block Browser Run by IP reputation or bot defenses. The project does
-  not bypass CAPTCHA, MFA, access controls, or other challenges.
-- A browser adapter is less stable than a supported payment API. Changed
-  labels, origins, amount semantics, or confirmation behavior stop the run.
-- The 17:00 UTC Cron is 9 a.m. Pacific Standard Time and 10 a.m. Pacific
-  Daylight Time. It evaluates the due window rather than assuming a fixed bill
-  day.
-- This tool does not guarantee timely payment. Check SCE after onboarding and
-  periodically thereafter.
-- Users are responsible for confirming that their use complies with SCE,
-  Cloudflare, their card issuer, and applicable terms.
+The code can be validated without a real charge, but SCE exposes no supported
+card-payment API and Cloudflare Browser Run is identifiable as automation. A
+deployment is intentionally not armed until its account-specific Guest Pay
+state reaches a valid review from Cloudflare. CAPTCHA, login, blocked cloud
+browsers, expired/device-bound tokens, new origins, route changes, ambiguous
+labels, or an unknown confirmation stop safely; the project does not bypass
+those controls.
+
+A dry run proves the current review path, not that SCE will keep a token valid
+forever. Keep payment notifications enabled and periodically confirm SCE
+payment history.

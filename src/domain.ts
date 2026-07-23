@@ -1,7 +1,13 @@
 import type { BrowserContextOptions } from "@cloudflare/playwright";
 
+export interface BrowserStateSnapshot {
+  storageState: NonNullable<BrowserContextOptions["storageState"]>;
+  sessionStorageByOrigin: Record<string, Record<string, string>>;
+}
+
 export interface GuestBundle {
-  version: 1;
+  version: 2;
+  configurationId: string;
   capturedAt: string;
   guestUrl: string;
   accountNumber: string;
@@ -12,14 +18,18 @@ export interface GuestBundle {
   payWhenDueWithinDays: number;
   allowedTopLevelOrigins: string[];
   allowedFrameOrigins: string[];
-  storageState: NonNullable<BrowserContextOptions["storageState"]>;
-  sessionStorageByOrigin: Record<string, Record<string, string>>;
+  allowedRequestOrigins: string[];
+  storageState: BrowserStateSnapshot["storageState"];
+  sessionStorageByOrigin: BrowserStateSnapshot["sessionStorageByOrigin"];
   notificationWebhookUrl?: string;
+  notificationWebhookSecret?: string;
 }
 
 export interface EncryptedBundle {
-  version: 1;
-  algorithm: "AES-GCM";
+  version: 2;
+  algorithm: "AES-256-GCM";
+  bundleId: string;
+  createdAt: string;
   iv: string;
   ciphertext: string;
 }
@@ -70,21 +80,32 @@ export interface RunLease {
 export interface PublicStatus {
   configured: boolean;
   armed: boolean;
+  releaseId: string;
+  configurationId?: string;
+  configuredAt?: string;
+  armedAt?: string;
+  dryRunValidatedAt?: string;
+  nextCheckAt?: string;
+  armBlockReason?: string;
   activeRun: boolean;
   blockingIntent?: PaymentIntent;
   lastRun?: RunRecord;
   confirmedPayments: PaymentIntent[];
+  recentRuns: RunRecord[];
 }
 
 export interface RunRecord {
+  id: string;
   at: string;
   source: "cron" | "manual";
   dryRun: boolean;
   outcome: string;
   message: string;
+  releaseId: string;
 }
 
 export type WorkflowOutcome =
+  | { status: "deferred"; message: string; nextCheckAt: string }
   | { status: "no-balance"; message: string }
   | { status: "not-due"; message: string; dueDate: string }
   | { status: "already-paid"; message: string }
@@ -96,21 +117,27 @@ export type WorkflowOutcome =
       confirmation: PaymentConfirmation;
     };
 
+export interface WorkflowExecution {
+  outcome: Exclude<WorkflowOutcome, { status: "deferred" }>;
+  refreshedBrowserState?: BrowserStateSnapshot;
+}
+
 export interface PortalClient {
   inspectBill(): Promise<BillSnapshot | null>;
   preparePayment(bill: BillSnapshot): Promise<PaymentReview>;
-  submitPayment(
-    onWillSubmit: () => Promise<void>,
-  ): Promise<PaymentConfirmation>;
+  submitPayment(onWillSubmit: () => Promise<void>): Promise<PaymentConfirmation>;
+  captureBrowserState(): Promise<BrowserStateSnapshot>;
   close(): Promise<void>;
 }
 
 export interface PaymentStore {
   acquireLease(now: Date): Promise<RunLease>;
+  renewLease(leaseId: string, now: Date): Promise<void>;
   releaseLease(leaseId: string): Promise<void>;
   findBlockingIntent(): Promise<PaymentIntent | undefined>;
   isFingerprintConfirmed(fingerprint: string): Promise<boolean>;
   beginIntent(
+    leaseId: string,
     fingerprint: string,
     review: PaymentReview,
     now: Date,

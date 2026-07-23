@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { BillSnapshot, GuestBundle, PaymentReview } from "../src/domain.js";
-import { validateBill, validateReview } from "../src/policy.js";
+import { daysUntil, validateBill, validateReview } from "../src/policy.js";
 
 const bundle: GuestBundle = {
-  version: 1,
+  version: 2,
+  configurationId: "AAAAAAAAAAAAAAAAAAAAAA",
   capturedAt: "2026-07-23T12:00:00.000Z",
   guestUrl: "https://www.sce.com/mysce/billsnpayments/paybills",
   accountNumber: "123456789012",
@@ -16,6 +17,7 @@ const bundle: GuestBundle = {
   payWhenDueWithinDays: 14,
   allowedTopLevelOrigins: ["https://www.sce.com"],
   allowedFrameOrigins: [],
+  allowedRequestOrigins: ["https://www.sce.com"],
   storageState: { cookies: [], origins: [] },
   sessionStorageByOrigin: {},
 };
@@ -55,22 +57,49 @@ test("bill policy enforces the ceiling and due window", () => {
 });
 
 test("the fee rule is strictly below four dollars", () => {
-  assert.doesNotThrow(() => validateReview(bill, review(399), bundle));
-  assert.throws(() => validateReview(bill, review(400), bundle));
+  const now = new Date("2026-07-23T12:01:00.000Z");
+  assert.doesNotThrow(() => validateReview(bill, review(399), bundle, now));
+  assert.throws(() => validateReview(bill, review(400), bundle, now));
 });
 
 test("review must preserve amount, method, and arithmetic", () => {
+  const now = new Date("2026-07-23T12:01:00.000Z");
   assert.throws(() =>
-    validateReview(bill, { ...review(165), amountCents: 1 }, bundle),
+    validateReview(bill, { ...review(165), amountCents: 1 }, bundle, now),
   );
   assert.throws(() =>
-    validateReview(
-      bill,
-      { ...review(165), paymentMethodLast4: "1111" },
+    validateReview(bill, { ...review(165), paymentMethodLast4: "1111" }, bundle, now),
+  );
+  assert.throws(() =>
+    validateReview(bill, { ...review(165), totalCents: 1 }, bundle, now),
+  );
+});
+
+test("stale observations and implausible bill cycles fail closed", () => {
+  assert.throws(() =>
+    validateBill(
+      { ...bill, observedAt: "2026-07-23T11:54:59.000Z" },
       bundle,
+      new Date("2026-07-23T12:00:00.000Z"),
     ),
   );
   assert.throws(() =>
-    validateReview(bill, { ...review(165), totalCents: 1 }, bundle),
+    validateBill(
+      { ...bill, dueDate: "2027-01-01" },
+      bundle,
+      new Date("2026-07-23T12:00:00.000Z"),
+    ),
+  );
+});
+
+test("due windows use Southern California calendar days", () => {
+  assert.equal(daysUntil("2026-07-31", new Date("2026-07-31T17:00:00.000Z")), 0);
+  assert.equal(daysUntil("2026-07-31", new Date("2026-08-01T06:59:59.000Z")), 0);
+  assert.equal(daysUntil("2026-07-31", new Date("2026-08-01T07:00:00.000Z")), -1);
+});
+
+test("stale final reviews fail closed", () => {
+  assert.throws(() =>
+    validateReview(bill, review(165), bundle, new Date("2026-07-23T12:05:01.000Z")),
   );
 });

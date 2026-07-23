@@ -5,14 +5,21 @@
 - Node.js 22 or newer
 - Google Chrome
 - a Cloudflare account with Workers, Browser Run, Durable Objects, and a
-  `workers.dev` subdomain available
+  `workers.dev` subdomain
 - Wrangler authenticated with `npx wrangler login`
-- the SCE customer account number and five-digit mailing ZIP
-- a card that the current SCE Guest Pay experience can tokenize or remember
+- SCE customer account number and five-digit mailing ZIP
+- a card the current SCE Guest Pay flow can tokenize or retain
+
+Run the standalone preflight at any time:
+
+```bash
+npm run sce-pay -- doctor
+```
+
+It checks Node, Wrangler authentication, and Chrome without touching an SCE
+account or deploying.
 
 ## Wizard
-
-Run:
 
 ```bash
 npm ci
@@ -20,52 +27,66 @@ npx wrangler login
 npm run setup
 ```
 
-Chrome opens on the current SCE payment route. Choose Guest Pay and complete the
-flow until the final review page. Enter card data only into the SCE-controlled
-page. Do not click the final submission control.
+Chrome opens at the current SCE-owned payment route. Choose Guest Pay, complete
+the guest card flow, and stop at final review. Do not submit.
 
-Back in the terminal, confirm the exact top-level and embedded HTTPS origins.
-Do not approve an origin you do not recognize from the reviewed payment flow.
+The capture must remain top-level at:
 
-The wizard then requests:
+```text
+https://www.sce.com/mysce/billsnpayments/paybills
+```
 
-- SCE customer account number (hidden input);
-- five-digit mailing ZIP (hidden input);
-- the reviewed card's last four digits;
-- maximum bill amount;
-- exclusive fee ceiling, default `$4.00`;
-- number of days before due date to pay, default `14`; and
-- optional HTTPS notification webhook.
+The wizard rejects legacy/external top-level portals. It derives the masked card
+ending from the review and displays every top-level, frame, and supporting
+network origin observed. Approve only the origins you recognize from this
+reviewed flow.
+
+The remaining prompts collect:
+
+- SCE customer account number and ZIP as hidden input;
+- maximum bill amount, default `$750.00`;
+- exclusive convenience-fee ceiling, default and maximum `$4.00`;
+- days before due date to pay, default `14`; and
+- optional credential-free HTTPS notification webhook.
 
 The default fee policy accepts `$0.00` through `$3.99` and rejects `$4.00` or
 more.
 
-## Deployment gate
+## Deployment transaction
 
-The wizard deploys the Worker in a disarmed state, installs fresh secrets,
-uploads the encrypted bundle, and invokes a dry run in Cloudflare Browser Run.
-Only a successful review arms the Cron.
+The wizard generates a configuration ID, encryption key, administrator token,
+and optional webhook signing secret. It encrypts the complete bundle locally,
+writes a temporary private secrets file, and asks Wrangler to deploy code and
+both Worker secrets in one version. The temporary file is removed in `finally`.
 
-If the dry run fails, the deployment remains disarmed. Common causes:
+The local control file is saved immediately after deployment, before state
+upload, so an interrupted reconfiguration still leaves a recovery credential.
+The Worker decrypts and validates the bundle before accepting it and always
+stores new configuration disarmed.
 
-- the guest token is not reusable;
-- the card method is no longer visible;
-- SCE asked for an anti-automation challenge;
-- Cloudflare's browser was blocked;
-- an origin changed between local calibration and cloud execution; or
-- SCE labels or review structure changed.
+The wizard then performs the complete account-specific review in Cloudflare
+Browser Run. Only that exact release and configuration can be armed, and the
+attestation expires after one hour.
 
-Never work around a CAPTCHA or broaden origin approval blindly. Inspect the
+## Expected failures
+
+The Worker remains disarmed when:
+
+- Guest Pay does not retain a reusable tokenized method;
+- the payment method ending is absent or ambiguous;
+- SCE requests CAPTCHA, login, or another interactive challenge;
+- SCE blocks Browser Run;
+- a page, frame, request, or WebSocket origin was not reviewed;
+- top-level navigation leaves the current SCE route;
+- labels, dates, arithmetic, or final control are ambiguous; or
+- the Worker release changes after validation.
+
+Do not solve CAPTCHA programmatically or approve unfamiliar origins. Inspect the
 current flow and rerun onboarding.
 
-## Recovery
+## Reconfiguration
 
-Token expiration or page drift does not require keeping the computer online.
-It requires a new one-time setup:
-
-```bash
-npm run setup
-```
-
-The new encrypted bundle replaces the old one. Confirmed bill fingerprints and
-unresolved payment intents remain in the Durable Object.
+Rerunning setup rotates Worker secrets and configuration, invalidating the
+prior arm record. Confirmed fingerprints remain. A blocking unresolved intent
+prevents configuration replacement; reconcile it first using the current
+control token.

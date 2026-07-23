@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   extractConfirmation,
+  extractDisplayedCardLast4,
   extractDueDate,
   labeledMoney,
   safeAccountReference,
@@ -35,4 +36,19 @@ test("account references are irreversible", () => {
   const reference = safeAccountReference("123-456-7890-12");
   assert.match(reference, /^sce-[a-f0-9]{12}$/);
   assert.equal(reference.includes("123456"), false);
+});
+
+test("reviewed card ending must be visible and unambiguous", () => {
+  assert.equal(extractDisplayedCardLast4("Credit card ending in 4242"), "4242");
+  assert.throws(() =>
+    extractDisplayedCardLast4("Card ending in 4242; card ending in 1111"),
+  );
+  assert.throws(() => extractDisplayedCardLast4("Credit card selected"));
+});
+
+test("conflicting labeled values fail closed", () => {
+  assert.throws(() =>
+    labeledMoney("Payment amount: $10.00\nPayment amount: $11.00", ["payment amount"]),
+  );
+  assert.throws(() => extractDueDate("Due date: 07/31/2026\nPayment due: 08/01/2026"));
 });

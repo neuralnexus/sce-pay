@@ -1,15 +1,19 @@
-import type { EncryptedBundle, GuestBundle, RunRecord } from "./domain.js";
 import { DurableObject } from "cloudflare:workers";
-import { validateGuestBundle } from "./bundle.js";
-import { decryptBundle } from "./crypto.js";
-import { safeError, ScePayError } from "./errors.js";
+import { randomUUID } from "node:crypto";
+import { mergeBrowserState, validateGuestBundle } from "./bundle.js";
+import { decryptBundle, encryptBundle } from "./crypto.js";
+import type { EncryptedBundle, GuestBundle, RunRecord } from "./domain.js";
+import { ScePayError, safeError } from "./errors.js";
+import { sendNotification } from "./notifications.js";
 import { CloudflareGuestPortal } from "./portal/guestPortal.js";
+import { nextCheckAfterOutcome, nextCheckAfterSafeFailure } from "./schedule.js";
 import { DurablePaymentStore } from "./store.js";
 import { runPaymentWorkflow } from "./workflow.js";
 
 export interface Env {
   BROWSER: Fetcher;
   PAYMENT_ACCOUNT: DurableObjectNamespace<PaymentAccount>;
+  CF_VERSION_METADATA: WorkerVersionMetadata;
   BUNDLE_KEY?: string;
   ADMIN_TOKEN?: string;
 }
@@ -19,15 +23,6 @@ function json(value: unknown, status = 200): Response {
     status,
     headers: { "cache-control": "no-store" },
   });
-}
-
-async function notify(bundle: GuestBundle, body: unknown): Promise<void> {
-  if (!bundle.notificationWebhookUrl) return;
-  await fetch(bundle.notificationWebhookUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  }).catch(() => undefined);
 }
 
 export class PaymentAccount extends DurableObject<Env> {
@@ -42,7 +37,10 @@ export class PaymentAccount extends DurableObject<Env> {
     this.#store = new DurablePaymentStore(state.storage);
   }
 
-  async #loadBundle(): Promise<GuestBundle> {
+  async #loadBundle(): Promise<{
+    bundle: GuestBundle;
+    encrypted: EncryptedBundle;
+  }> {
     if (!this.#env.BUNDLE_KEY) {
       throw new ScePayError(
         "CONFIGURATION_REQUIRED",
@@ -56,9 +54,10 @@ export class PaymentAccount extends DurableObject<Env> {
         "Run the onboarding wizard before checking a bill.",
       );
     }
-    return validateGuestBundle(
-      await decryptBundle(encrypted, this.#env.BUNDLE_KEY),
-    );
+    return {
+      bundle: validateGuestBundle(await decryptBundle(encrypted, this.#env.BUNDLE_KEY)),
+      encrypted,
+    };
   }
 
   async #run(request: Request): Promise<Response> {
@@ -68,60 +67,114 @@ export class PaymentAccount extends DurableObject<Env> {
     };
     const source = payload.source === "cron" ? "cron" : "manual";
     const dryRun = payload.dryRun === true;
-    const armed = (await this.#state.storage.get<boolean>("armed")) === true;
-    if (!dryRun && !armed) {
-      return json(
-        {
-          ok: false,
-          error: {
-            code: "CONFIGURATION_REQUIRED",
-            message: "Automatic submission is disarmed.",
-            attentionRequired: true,
-          },
-        },
-        409,
-      );
-    }
+    const releaseId = this.#env.CF_VERSION_METADATA.id;
+    const now = new Date();
 
     let bundle: GuestBundle | undefined;
     try {
-      bundle = await this.#loadBundle();
-      const result = await runPaymentWorkflow({
+      ({ bundle } = await this.#loadBundle());
+      if (!dryRun) {
+        await this.#store.assertArmed(bundle.configurationId, releaseId);
+      }
+      if (source === "cron" && !dryRun) {
+        const nextCheckAt = await this.#store.deferredUntil(now);
+        if (nextCheckAt) {
+          const result = {
+            status: "deferred" as const,
+            nextCheckAt,
+            message: "The next browser check is not due yet.",
+          };
+          const record: RunRecord = {
+            id: randomUUID(),
+            at: now.toISOString(),
+            source,
+            dryRun,
+            outcome: result.status,
+            message: result.message,
+            releaseId,
+          };
+          await this.#store.recordRun(record);
+          return json({ ok: true, result });
+        }
+      }
+      const execution = await runPaymentWorkflow({
         bundle,
         portal: new CloudflareGuestPortal(this.#env.BROWSER, bundle),
         store: this.#store,
         dryRun,
+        now,
       });
+      const result = execution.outcome;
+      if (execution.refreshedBrowserState && this.#env.BUNDLE_KEY) {
+        try {
+          bundle = mergeBrowserState(bundle, execution.refreshedBrowserState);
+          const refreshed = await encryptBundle(bundle, this.#env.BUNDLE_KEY);
+          await this.#store.updateBundleMetadata(
+            bundle.configurationId,
+            refreshed.bundleId,
+            refreshed,
+          );
+        } catch {
+          console.error(
+            JSON.stringify({
+              event: "browser-state-refresh-failed",
+              releaseId,
+              outcome: result.status,
+            }),
+          );
+        }
+      }
+      if (result.status === "dry-run") {
+        await this.#store.recordDryRunValidation(
+          bundle.configurationId,
+          releaseId,
+          new Date(),
+        );
+      }
+      const nextCheckAt =
+        result.status === "dry-run"
+          ? undefined
+          : nextCheckAfterOutcome(result, bundle, new Date());
       const record: RunRecord = {
+        id: randomUUID(),
         at: new Date().toISOString(),
         source,
         dryRun,
         outcome: result.status,
         message: result.message,
+        releaseId,
       };
-      await this.#store.recordRun(record);
-      await notify(bundle, {
-        product: "sce-pay",
-        ok: true,
-        outcome: result.status,
-        message: result.message,
-      });
+      await this.#store.recordRun(record, nextCheckAt);
+      if (result.status === "paid") {
+        await sendNotification(bundle, {
+          kind: "payment-confirmed",
+          outcome: result.status,
+          message: result.message,
+        });
+      }
       return json({ ok: true, result });
     } catch (error) {
       const safe = safeError(error);
       const record: RunRecord = {
+        id: randomUUID(),
         at: new Date().toISOString(),
         source,
         dryRun,
         outcome: safe.code,
         message: safe.message,
+        releaseId,
       };
-      await this.#store.recordRun(record);
+      await this.#store.recordRun(
+        record,
+        source === "cron" && safe.code !== "PAYMENT_UNCERTAIN"
+          ? nextCheckAfterSafeFailure(new Date())
+          : undefined,
+      );
       if (bundle) {
-        await notify(bundle, {
-          product: "sce-pay",
-          ok: false,
-          error: safe,
+        await sendNotification(bundle, {
+          kind: "attention-required",
+          outcome: safe.code,
+          message: safe.message,
         });
       }
       return json({ ok: false, error: safe }, safe.attentionRequired ? 409 : 503);
@@ -131,36 +184,56 @@ export class PaymentAccount extends DurableObject<Env> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/status") {
-      return json(await this.#store.status());
+      return json(await this.#store.status(this.#env.CF_VERSION_METADATA.id));
     }
     if (request.method === "POST" && url.pathname === "/setup") {
-      const encrypted = (await request.json()) as EncryptedBundle;
+      if (!this.#env.BUNDLE_KEY) {
+        return json({ ok: false, error: "encryption key not configured" }, 409);
+      }
+      const encrypted = (await request.json().catch(() => undefined)) as
+        | EncryptedBundle
+        | undefined;
       if (
-        encrypted.version !== 1 ||
-        encrypted.algorithm !== "AES-GCM" ||
+        encrypted?.version !== 2 ||
+        encrypted.algorithm !== "AES-256-GCM" ||
+        typeof encrypted.bundleId !== "string" ||
+        typeof encrypted.createdAt !== "string" ||
         typeof encrypted.iv !== "string" ||
         typeof encrypted.ciphertext !== "string" ||
-        encrypted.ciphertext.length > 500_000
+        encrypted.ciphertext.length > 512_000
       ) {
         return json({ ok: false, error: "invalid encrypted setup bundle" }, 400);
       }
-      await this.#state.storage.put({
-        bundle: encrypted,
-        configured: true,
-        armed: false,
-      });
+      let bundle: GuestBundle;
+      try {
+        bundle = validateGuestBundle(
+          await decryptBundle(encrypted, this.#env.BUNDLE_KEY),
+        );
+      } catch {
+        return json({ ok: false, error: "invalid encrypted setup bundle" }, 400);
+      }
+      await this.#store.configure(
+        bundle.configurationId,
+        encrypted.bundleId,
+        encrypted,
+        new Date(),
+      );
       return json({ ok: true, armed: false });
     }
     if (request.method === "POST" && url.pathname === "/run") {
       return this.#run(request);
     }
     if (request.method === "POST" && url.pathname === "/arm") {
-      await this.#loadBundle();
-      await this.#state.storage.put("armed", true);
+      const { bundle } = await this.#loadBundle();
+      await this.#store.arm(
+        bundle.configurationId,
+        this.#env.CF_VERSION_METADATA.id,
+        new Date(),
+      );
       return json({ ok: true, armed: true });
     }
     if (request.method === "POST" && url.pathname === "/disarm") {
-      await this.#state.storage.put("armed", false);
+      await this.#store.disarm();
       return json({ ok: true, armed: false });
     }
     if (request.method === "POST" && url.pathname === "/reconcile") {
@@ -172,7 +245,10 @@ export class PaymentAccount extends DurableObject<Env> {
       };
       if (
         !input.intentId ||
+        !/^[0-9a-f-]{36}$/i.test(input.intentId) ||
         !input.note ||
+        input.note.length > 500 ||
+        (input.confirmationNumber?.length ?? 0) > 128 ||
         !["paid", "not-paid"].includes(input.result ?? "")
       ) {
         return json({ ok: false, error: "invalid reconciliation" }, 400);

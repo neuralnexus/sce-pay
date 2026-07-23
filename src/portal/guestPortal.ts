@@ -1,14 +1,15 @@
 import {
-  launch,
   type Browser,
   type BrowserContext,
   type Frame,
   type Locator,
+  launch,
   type Page,
 } from "@cloudflare/playwright";
 
 import type {
   BillSnapshot,
+  BrowserStateSnapshot,
   GuestBundle,
   PaymentConfirmation,
   PaymentReview,
@@ -21,24 +22,39 @@ import {
   SiteChangedError,
 } from "../errors.js";
 import { parseMoneyToCents } from "../money.js";
-import { assertAllowedOrigin, normalizedOrigin } from "../origins.js";
+import {
+  assertAllowedOrigin,
+  assertAllowedTopLevelUrl,
+  isLocallySafeRequestUrl,
+  normalizedOrigin,
+} from "../origins.js";
 import {
   extractConfirmation,
+  extractDisplayedCardLast4,
   extractDueDate,
   labeledMoney,
   safeAccountReference,
 } from "../parsing.js";
+import { validateReview } from "../policy.js";
 
 type Scope = Page | Frame;
 
-const BILL_LABELS = ["current amount due", "total amount due", "amount due", "balance due"];
+const BILL_LABELS = [
+  "current amount due",
+  "total amount due",
+  "amount due",
+  "balance due",
+];
 const FEE_LABELS = ["convenience fee", "service fee", "processing fee"];
 const TOTAL_LABELS = ["total payment", "payment total", "total"];
 
 async function firstVisible(locators: Locator[]): Promise<Locator | null> {
   for (const locator of locators) {
     const candidate = locator.first();
-    if ((await candidate.count()) > 0 && (await candidate.isVisible().catch(() => false))) {
+    if (
+      (await candidate.count()) > 0 &&
+      (await candidate.isVisible().catch(() => false))
+    ) {
       return candidate;
     }
   }
@@ -70,8 +86,16 @@ async function input(scopes: Scope[], label: RegExp): Promise<Locator | null> {
   return null;
 }
 
-async function bodyText(page: Page): Promise<string> {
-  return page.locator("body").innerText({ timeout: 15_000 });
+async function allBodyText(page: Page): Promise<string> {
+  const chunks = await Promise.all(
+    page.frames().map((frame) =>
+      frame
+        .locator("body")
+        .innerText({ timeout: 15_000 })
+        .catch(() => ""),
+    ),
+  );
+  return chunks.filter(Boolean).join("\n\n");
 }
 
 function scopes(page: Page): Scope[] {
@@ -81,7 +105,9 @@ function scopes(page: Page): Scope[] {
 async function clickAndSettle(locator: Locator, page: Page): Promise<void> {
   await locator.click({ timeout: 15_000 });
   await page.waitForTimeout(750);
-  await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
+  await page
+    .waitForLoadState("domcontentloaded", { timeout: 15_000 })
+    .catch(() => undefined);
 }
 
 function detectInterruption(text: string): void {
@@ -119,6 +145,7 @@ export class CloudflareGuestPortal implements PortalClient {
   #bill: BillSnapshot | undefined;
   #review: PaymentReview | undefined;
   #popupObserved = false;
+  #environmentViolation: string | undefined;
 
   constructor(browserBinding: Fetcher, bundle: GuestBundle) {
     this.#browserBinding = browserBinding;
@@ -130,6 +157,35 @@ export class CloudflareGuestPortal implements PortalClient {
     this.#browser = await launch(this.#browserBinding);
     this.#context = await this.#browser.newContext({
       storageState: this.#bundle.storageState,
+      acceptDownloads: false,
+      serviceWorkers: "block",
+    });
+    await this.#context.route("**/*", async (route) => {
+      const requestUrl = route.request().url();
+      const origin = normalizedOrigin(requestUrl);
+      if (
+        isLocallySafeRequestUrl(requestUrl) ||
+        (origin !== null && this.#bundle.allowedRequestOrigins.includes(origin))
+      ) {
+        await route.continue();
+        return;
+      }
+      this.#environmentViolation =
+        "The payment flow attempted an unreviewed network origin.";
+      await route.abort("blockedbyclient");
+    });
+    await this.#context.routeWebSocket("**/*", (socket) => {
+      const origin = normalizedOrigin(socket.url());
+      if (origin && this.#bundle.allowedRequestOrigins.includes(origin)) {
+        socket.connectToServer();
+        return;
+      }
+      this.#environmentViolation =
+        "The payment flow attempted an unreviewed WebSocket origin.";
+      void socket.close({
+        code: 1008,
+        reason: "Origin was not approved during onboarding.",
+      });
     });
     await this.#context.addInitScript((state) => {
       const values = state[location.origin];
@@ -139,9 +195,50 @@ export class CloudflareGuestPortal implements PortalClient {
       }
     }, this.#bundle.sessionStorageByOrigin);
     const page = await this.#context.newPage();
+    this.#context.on("page", (popup) => {
+      if (popup === page) return;
+      this.#popupObserved = true;
+      void popup.close();
+    });
     page.on("popup", (popup) => {
       this.#popupObserved = true;
       void popup.close();
+    });
+    page.on("download", (download) => {
+      this.#environmentViolation = "The payment flow attempted an unexpected download.";
+      void download.cancel();
+    });
+    page.on("dialog", (dialog) => {
+      this.#environmentViolation =
+        "The payment flow opened an unexpected browser dialog.";
+      void dialog.dismiss();
+    });
+    page.on("websocket", (socket) => {
+      const origin = normalizedOrigin(socket.url());
+      if (origin === null || !this.#bundle.allowedRequestOrigins.includes(origin)) {
+        this.#environmentViolation =
+          "The payment flow attempted an unreviewed WebSocket origin.";
+      }
+    });
+    page.on("framenavigated", (frame) => {
+      try {
+        if (frame === page.mainFrame()) {
+          assertAllowedTopLevelUrl(frame.url());
+          return;
+        }
+        const origin = normalizedOrigin(frame.url());
+        if (
+          origin &&
+          !this.#bundle.allowedTopLevelOrigins.includes(origin) &&
+          !this.#bundle.allowedFrameOrigins.includes(origin)
+        ) {
+          this.#environmentViolation =
+            "The payment flow navigated a frame to an unreviewed origin.";
+        }
+      } catch {
+        this.#environmentViolation =
+          "Top-level navigation left the current SCE Guest Pay application.";
+      }
     });
     await page.goto(this.#bundle.guestUrl, {
       waitUntil: "domcontentloaded",
@@ -156,8 +253,14 @@ export class CloudflareGuestPortal implements PortalClient {
     const page = this.#page;
     if (!page) throw new SiteChangedError("The SCE page was not opened.");
     if (this.#popupObserved) {
-      throw new SiteChangedError("The payment flow opened an unexpected top-level window.");
+      throw new SiteChangedError(
+        "The payment flow opened an unexpected top-level window.",
+      );
     }
+    if (this.#environmentViolation) {
+      throw new SiteChangedError(this.#environmentViolation);
+    }
+    assertAllowedTopLevelUrl(page.url());
     assertAllowedOrigin(page.url(), this.#bundle.allowedTopLevelOrigins, "top-level");
     for (const frame of page.frames()) {
       const origin = normalizedOrigin(frame.url());
@@ -171,7 +274,7 @@ export class CloudflareGuestPortal implements PortalClient {
         );
       }
     }
-    detectInterruption(await bodyText(page));
+    detectInterruption(await allBodyText(page));
   }
 
   async #enterGuestAccount(page: Page): Promise<void> {
@@ -198,10 +301,16 @@ export class CloudflareGuestPortal implements PortalClient {
     if (zip) await zip.fill(this.#bundle.mailingZip);
     if (account || zip) {
       if (!account || !zip) {
-        throw new SiteChangedError("Only part of the guest account form was recognized.");
+        throw new SiteChangedError(
+          "Only part of the guest account form was recognized.",
+        );
       }
-      const next = await control(scopes(page), /^(?:continue|next|find account|submit)$/i);
-      if (!next) throw new SiteChangedError("The guest account form continue control changed.");
+      const next = await control(
+        scopes(page),
+        /^(?:continue|next|find account|submit)$/i,
+      );
+      if (!next)
+        throw new SiteChangedError("The guest account form continue control changed.");
       await clickAndSettle(next, page);
       await this.#assertEnvironment();
     }
@@ -210,9 +319,11 @@ export class CloudflareGuestPortal implements PortalClient {
   async inspectBill(): Promise<BillSnapshot | null> {
     const page = await this.#open();
     await this.#enterGuestAccount(page);
-    const text = await bodyText(page);
+    const text = await allBodyText(page);
     detectInterruption(text);
-    if (/no (?:current )?(?:balance|payment) due|amount due\s*:?\s*\$0\.00/i.test(text)) {
+    if (
+      /no (?:current )?(?:balance|payment) due|amount due\s*:?\s*\$0\.00/i.test(text)
+    ) {
       return null;
     }
     const bill: BillSnapshot = {
@@ -245,7 +356,9 @@ export class CloudflareGuestPortal implements PortalClient {
       await amountField.fill((bill.amountCents / 100).toFixed(2));
       const entered = parseMoneyToCents(await amountField.inputValue());
       if (entered !== bill.amountCents) {
-        throw new PolicyStopError("The guest form did not retain the full bill amount.");
+        throw new PolicyStopError(
+          "The guest form did not retain the full bill amount.",
+        );
       }
     }
 
@@ -258,7 +371,7 @@ export class CloudflareGuestPortal implements PortalClient {
       await this.#assertEnvironment();
     }
 
-    let text = await bodyText(page);
+    let text = await allBodyText(page);
     const cardPattern = new RegExp(
       `(?:ending(?:\\s+in)?|\\*{2,}|x{2,}|[•·]{2,})\\s*${this.#bundle.paymentMethodLast4}`,
       "i",
@@ -276,7 +389,7 @@ export class CloudflareGuestPortal implements PortalClient {
     if (savedMethod) await savedMethod.click();
 
     for (let step = 0; step < 3; step += 1) {
-      text = await bodyText(page);
+      text = await allBodyText(page);
       if (
         FEE_LABELS.some((label) => new RegExp(label, "i").test(text)) &&
         TOTAL_LABELS.some((label) => new RegExp(label, "i").test(text))
@@ -289,7 +402,7 @@ export class CloudflareGuestPortal implements PortalClient {
       await this.#assertEnvironment();
     }
 
-    text = await bodyText(page);
+    text = await allBodyText(page);
     detectInterruption(text);
     const review: PaymentReview = {
       accountReference: bill.accountReference,
@@ -298,15 +411,13 @@ export class CloudflareGuestPortal implements PortalClient {
       totalCents: labeledMoney(text, TOTAL_LABELS),
       dueDate: bill.dueDate,
       observedAt: new Date().toISOString(),
-      paymentMethodLast4: this.#bundle.paymentMethodLast4,
+      paymentMethodLast4: extractDisplayedCardLast4(text),
     };
     this.#review = review;
     return review;
   }
 
-  async submitPayment(
-    onWillSubmit: () => Promise<void>,
-  ): Promise<PaymentConfirmation> {
+  async submitPayment(onWillSubmit: () => Promise<void>): Promise<PaymentConfirmation> {
     const page = this.#page;
     if (!page || !this.#review) {
       throw new PolicyStopError("A verified review is required before submission.");
@@ -319,14 +430,64 @@ export class CloudflareGuestPortal implements PortalClient {
       ]),
     );
     if (consent && !(await consent.isChecked())) await consent.check();
+    await this.#assertEnvironment();
 
-    const submit = await control(
-      scopes(page),
-      /^(?:submit payment|confirm payment|complete payment|pay now|make payment|pay\s+\$?[\d,.]+)$/i,
-    );
-    if (!submit) {
+    const submitPattern =
+      /^(?:submit payment|confirm payment|complete payment|pay now|make payment|pay\s+\$?[\d,.]+)$/i;
+    const submitCandidates: Locator[] = [];
+    for (const scope of scopes(page)) {
+      for (const locator of [
+        scope.getByRole("button", { name: submitPattern }),
+        scope.getByRole("link", { name: submitPattern }),
+      ]) {
+        for (let index = 0; index < (await locator.count()); index += 1) {
+          const candidate = locator.nth(index);
+          if (await candidate.isVisible().catch(() => false)) {
+            submitCandidates.push(candidate);
+          }
+        }
+      }
+    }
+    if (submitCandidates.length !== 1) {
       throw new SiteChangedError(
-        "The final payment control was not found on the verified review.",
+        submitCandidates.length === 0
+          ? "The final payment control was not found on the verified review."
+          : "The verified review exposed more than one final payment control.",
+      );
+    }
+    const submit = submitCandidates[0];
+    if (!submit || !(await submit.isEnabled())) {
+      throw new SiteChangedError("The final payment control is not enabled.");
+    }
+
+    const finalText = await allBodyText(page);
+    const finalAmount = labeledMoney(finalText, ["payment amount", ...BILL_LABELS]);
+    const finalFee = labeledMoney(finalText, FEE_LABELS);
+    const finalTotal = labeledMoney(finalText, TOTAL_LABELS);
+    const finalLast4 = extractDisplayedCardLast4(finalText);
+    const finalReview: PaymentReview = {
+      ...this.#review,
+      amountCents: finalAmount,
+      feeCents: finalFee,
+      totalCents: finalTotal,
+      paymentMethodLast4: finalLast4,
+      observedAt: new Date().toISOString(),
+    };
+    try {
+      validateReview(this.#bill ?? finalReview, finalReview, this.#bundle, new Date());
+    } catch {
+      throw new PolicyStopError(
+        "The payment review changed immediately before submission.",
+      );
+    }
+    if (
+      finalAmount !== this.#review.amountCents ||
+      finalFee !== this.#review.feeCents ||
+      finalTotal !== this.#review.totalCents ||
+      finalLast4 !== this.#review.paymentMethodLast4
+    ) {
+      throw new PolicyStopError(
+        "The payment review changed immediately before submission.",
       );
     }
 
@@ -334,10 +495,16 @@ export class CloudflareGuestPortal implements PortalClient {
     try {
       await submit.click({ timeout: 15_000 });
       await page.waitForTimeout(1_000);
-      await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
+      await page
+        .waitForLoadState("domcontentloaded", { timeout: 15_000 })
+        .catch(() => undefined);
       await this.#assertEnvironment();
-      const text = await bodyText(page);
-      if (!/thank you|payment (?:was )?(?:submitted|successful|received|confirmed)/i.test(text)) {
+      const text = await allBodyText(page);
+      if (
+        !/thank you|payment (?:was )?(?:submitted|successful|received|confirmed)/i.test(
+          text,
+        )
+      ) {
         throw new PaymentUncertainError();
       }
       return {
@@ -348,6 +515,30 @@ export class CloudflareGuestPortal implements PortalClient {
       if (error instanceof PaymentUncertainError) throw error;
       throw new PaymentUncertainError();
     }
+  }
+
+  async captureBrowserState(): Promise<BrowserStateSnapshot> {
+    const context = this.#context;
+    const page = this.#page;
+    if (!context || !page) {
+      throw new SiteChangedError("No browser state is available to refresh.");
+    }
+    await this.#assertEnvironment();
+    const sessionStorageByOrigin: Record<string, Record<string, string>> = {};
+    for (const frame of page.frames()) {
+      const origin = normalizedOrigin(frame.url());
+      if (!origin) continue;
+      const values = await frame
+        .evaluate(() => Object.fromEntries(Object.entries(sessionStorage)))
+        .catch(() => undefined);
+      if (values && Object.keys(values).length > 0) {
+        sessionStorageByOrigin[origin] = values;
+      }
+    }
+    return {
+      storageState: await context.storageState({ indexedDB: true }),
+      sessionStorageByOrigin,
+    };
   }
 
   async close(): Promise<void> {

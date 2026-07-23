@@ -16,7 +16,8 @@ import { runPaymentWorkflow } from "../src/workflow.js";
 
 const NOW = new Date("2026-07-23T12:00:00.000Z");
 const bundle: GuestBundle = {
-  version: 1,
+  version: 2,
+  configurationId: "AAAAAAAAAAAAAAAAAAAAAA",
   capturedAt: NOW.toISOString(),
   guestUrl: "https://www.sce.com/mysce/billsnpayments/paybills",
   accountNumber: "123456789012",
@@ -27,6 +28,7 @@ const bundle: GuestBundle = {
   payWhenDueWithinDays: 14,
   allowedTopLevelOrigins: ["https://www.sce.com"],
   allowedFrameOrigins: [],
+  allowedRequestOrigins: ["https://www.sce.com"],
   storageState: { cookies: [], origins: [] },
   sessionStorageByOrigin: {},
 };
@@ -59,6 +61,9 @@ class MemoryStore implements PaymentStore {
   async releaseLease(): Promise<void> {
     this.lease = undefined;
   }
+  async renewLease(leaseId: string): Promise<void> {
+    assert.equal(this.lease?.id, leaseId);
+  }
   async findBlockingIntent(): Promise<PaymentIntent | undefined> {
     return this.blocking;
   }
@@ -66,6 +71,7 @@ class MemoryStore implements PaymentStore {
     return this.confirmed.has(value);
   }
   async beginIntent(
+    _leaseId: string,
     fingerprint: string,
     paymentReview: PaymentReview,
   ): Promise<PaymentIntent> {
@@ -106,9 +112,7 @@ class FakePortal implements PortalClient {
   async preparePayment(): Promise<PaymentReview> {
     return review;
   }
-  async submitPayment(
-    onWillSubmit: () => Promise<void>,
-  ): Promise<PaymentConfirmation> {
+  async submitPayment(onWillSubmit: () => Promise<void>): Promise<PaymentConfirmation> {
     await onWillSubmit();
     this.submitted = true;
     if (this.failAfterBoundary) throw new PaymentUncertainError();
@@ -116,6 +120,12 @@ class FakePortal implements PortalClient {
   }
   async close(): Promise<void> {
     this.closed = true;
+  }
+  async captureBrowserState() {
+    return {
+      storageState: bundle.storageState,
+      sessionStorageByOrigin: bundle.sessionStorageByOrigin,
+    };
   }
 }
 
@@ -127,9 +137,10 @@ test("cloud workflow confirms once and suppresses the exact bill", async () => {
     portal,
     store,
     now: NOW,
+    clock: () => NOW,
     dryRun: false,
   });
-  assert.equal(first.status, "paid");
+  assert.equal(first.outcome.status, "paid");
   assert.equal(portal.submitted, true);
   assert.equal(portal.closed, true);
 
@@ -139,9 +150,10 @@ test("cloud workflow confirms once and suppresses the exact bill", async () => {
     portal: duplicatePortal,
     store,
     now: NOW,
+    clock: () => NOW,
     dryRun: false,
   });
-  assert.equal(second.status, "already-paid");
+  assert.equal(second.outcome.status, "already-paid");
   assert.equal(duplicatePortal.submitted, false);
 });
 
@@ -153,9 +165,10 @@ test("dry run reaches review without creating an intent", async () => {
     portal,
     store,
     now: NOW,
+    clock: () => NOW,
     dryRun: true,
   });
-  assert.equal(result.status, "dry-run");
+  assert.equal(result.outcome.status, "dry-run");
   assert.equal(store.blocking, undefined);
   assert.equal(portal.submitted, false);
 });
@@ -168,6 +181,7 @@ test("an uncertain result blocks every retry", async () => {
       portal: new FakePortal(true),
       store,
       now: NOW,
+      clock: () => NOW,
       dryRun: false,
     }),
     PaymentUncertainError,
@@ -179,6 +193,7 @@ test("an uncertain result blocks every retry", async () => {
       portal: new FakePortal(),
       store,
       now: NOW,
+      clock: () => NOW,
       dryRun: false,
     }),
   );

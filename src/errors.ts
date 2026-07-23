@@ -37,7 +37,9 @@ export class SiteChangedError extends ScePayError {
 }
 
 export class PaymentUncertainError extends ScePayError {
-  constructor(message = "The payment result is uncertain; automatic retries are blocked.") {
+  constructor(
+    message = "The payment result is uncertain; automatic retries are blocked.",
+  ) {
     super("PAYMENT_UNCERTAIN", message);
   }
 }

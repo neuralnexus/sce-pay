@@ -2,84 +2,98 @@
 
 ## Goal
 
-Run a low-frequency SCE Guest Pay browser workflow without making a laptop part
-of the production system. The design favors a visible stop over an uncertain
-payment.
+Run a low-frequency SCE Guest Pay workflow in Cloudflare without making a
+workstation part of production. Prefer a visible stop to a duplicate or
+misdirected payment.
 
 ```mermaid
 flowchart TD
-    A["One-time local wizard"] -->|"encrypted bundle"| B["Cloudflare Worker"]
+    A["One-time local wizard"] -->|"encrypted bundle"| B["Worker API"]
     C["Daily Cron"] --> B
     B --> D["Payment Durable Object"]
-    D --> E["Browser Run / SCE Guest Pay"]
+    D --> E["Browser Run"]
+    E --> F["SCE Guest Pay"]
 ```
 
 ## Components
 
 | Component | Responsibility |
 |---|---|
-| Local wizard | Human-reviewed guest flow, tokenized storage capture, origin approval, policy prompts, encryption, deployment, cloud dry run |
-| Worker | Bearer-authenticated control API, Cron entrypoint, routing to the single account object |
-| Durable Object | Strong run serialization, encrypted bundle storage, arming, payment intents, bill-cycle idempotency, reconciliation |
-| Browser Run adapter | Restore tokenized state, enter guest account details, read the bill, select the saved/tokenized method, verify review, submit |
-| Policy engine | Bill ceiling, due window, last-four binding, fee ceiling, review arithmetic |
+| Local wizard | Preflight, human-reviewed Guest Pay capture, payment-method proof, page/frame/request origin approval, encryption, atomic secret deployment, cloud dry run |
+| Worker | Constant-time bearer authentication, request limits, security headers, health/readiness, Cron entrypoint |
+| Durable Object | Configuration/release arming, run lease, adaptive check schedule, payment intents, duplicate index, reconciliation, bounded run history |
+| Browser adapter | Restore and refresh tokenized state, enforce route/network contract, inspect bill, prepare review, activate one final control |
+| Policy engine | Observation freshness, plausible bill cycle, full balance, bill ceiling, due window, card ending, fee ceiling, arithmetic |
 
-## Why Cloudflare
+## Cloudflare bindings
 
-Cloudflare Browser Run supports Playwright inside Workers, Cron Triggers invoke a
-Worker on a schedule, and Durable Objects provide a strongly consistent
-coordination boundary. No always-on server or workstation scheduler is needed.
+- `BROWSER`: Browser Run / Playwright
+- `PAYMENT_ACCOUNT`: SQLite-backed `PaymentAccount` Durable Object
+- `CF_VERSION_METADATA`: immutable current Worker version identity
+- `BUNDLE_KEY`: AES-256-GCM key, deployed as a Worker secret
+- `ADMIN_TOKEN`: control API bearer token, deployed as a Worker secret
+- Cron: `0 17 * * *` UTC
 
-The deployment uses:
+Code and secrets are uploaded in one Worker deployment. The arm record stores
+the current version ID and configuration ID. A later deploy therefore fails
+closed as `release-changed` until the new version passes a cloud dry run and is
+armed.
 
-- `@cloudflare/playwright`;
-- a Browser Run binding named `BROWSER`;
-- one SQLite-backed Durable Object class named `PaymentAccount`;
-- a daily `0 17 * * *` UTC Cron; and
-- Worker secrets `BUNDLE_KEY` and `ADMIN_TOKEN`.
+## Data path
 
-## Onboarding data path
+The local browser is the only place raw card fields are entered. At final review
+the wizard reads only the masked card ending, captures Playwright storage state
+and per-origin session storage, and records observed HTTPS origins. The bundle
+is encrypted locally using AES-256-GCM with authenticated context and a
+SHA-256-derived bundle ID. Durable Object storage receives only the envelope.
 
-The local browser is the only place where the user enters card fields. At the
-final review, the wizard captures browser storage state, per-origin session
-storage, navigation origins, and frame origins. It then asks separately for
-guest account identifiers and deterministic payment limits.
+After a safe cloud run, the adapter captures refreshed cookies, local storage,
+IndexedDB, and session storage. The Worker validates size and structure,
+re-encrypts with the Worker secret, and atomically replaces the ciphertext while
+preserving the stable configuration ID.
 
-The complete bundle is encrypted locally with a fresh 256-bit AES-GCM key. Only
-ciphertext is uploaded to the Durable Object. The key is installed as a
-non-readable Worker secret. The local control file contains only the deployed
-URL and administrator token.
+## Scheduled execution
 
-## Run sequence
+Cron wakes daily, but the Durable Object stores `nextCheckAt`:
 
-1. Cron requests a real run from the account Durable Object.
-2. The object rejects a concurrent lease or unresolved intent.
-3. It decrypts and validates the guest bundle.
-4. Browser Run restores captured browser state and enters the account number and
-   mailing ZIP in Guest Pay.
-5. The adapter reads amount due and due date.
-6. The policy engine checks amount and due window.
-7. A bill fingerprint checks the confirmed-payment index.
-8. The adapter selects the tokenized method and reaches review.
-9. Policy verifies account reference, amount, due date, last four, fee under
-   $4, and total arithmetic.
-10. The object persists a `submitting` intent.
-11. The adapter activates the exact final-payment control once.
-12. A recognized SCE confirmation changes the intent to `confirmed`.
+- confirmed payment: check again in 14 days;
+- no balance or already-confirmed bill: check again in 7 days;
+- bill not due: resume exactly when the configured due window opens;
+- safe pre-submission failure: retry on the next daily Cron; and
+- uncertain post-submission result: do not retry.
 
-Any exception after step 10 changes the intent to `unknown`. That state blocks
-all automatic runs until manual reconciliation.
+Deferred wakes do not launch a browser.
 
-## State
+## Payment sequence
 
-The Durable Object stores:
+1. Load and authenticate the encrypted bundle.
+2. Require the exact configuration/release arm record.
+3. Reject a not-yet-due browser check, active lease, or unresolved intent.
+4. Launch Browser Run with service workers blocked and an exact request
+   allowlist.
+5. Enter SCE account number and ZIP through Guest Pay.
+6. Read a fresh, plausible bill and due date.
+7. Reject a confirmed fingerprint for the same account, due date, and amount.
+8. Select the tokenized card and reach review.
+9. Parse the displayed card ending and require unambiguous amount, fee, total,
+   date, origin, and route evidence.
+10. Immediately re-read the review.
+11. Renew the exclusive lease and atomically write `submitting`.
+12. Activate exactly one enabled final-payment control.
+13. Require a recognizable success and confirmation identifier.
+14. Atomically mark the intent `confirmed` and index its fingerprint.
 
-- the encrypted onboarding bundle;
-- `configured` and `armed` flags;
-- a short run lease;
-- payment intents;
-- a confirmed fingerprint index;
-- the latest sanitized run record.
+Crashes after step 11 leave a blocking `submitting` intent. Exceptions after
+the click leave `unknown`. Neither is automatically retried.
 
-It does not store plaintext account identifiers, raw card data, browser
-screenshots, page HTML, or request/response payloads.
+## Durable state
+
+- encrypted bundle and stable configuration identity;
+- current dry-run attestation and release-bound arm record;
+- active run lease;
+- next browser-check time;
+- payment intents and confirmed fingerprints;
+- last run and the newest 100 sanitized run records.
+
+No raw card fields, password, screenshot, HTML, network payload, account number,
+ZIP, or browser token appears in status, notifications, or logs.

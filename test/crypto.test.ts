@@ -5,7 +5,8 @@ import { decryptBundle, encryptBundle, generateBundleKey } from "../src/crypto.j
 import type { GuestBundle } from "../src/domain.js";
 
 const bundle: GuestBundle = {
-  version: 1,
+  version: 2,
+  configurationId: "AAAAAAAAAAAAAAAAAAAAAA",
   capturedAt: "2026-07-23T12:00:00.000Z",
   guestUrl: "https://www.sce.com/mysce/billsnpayments/paybills",
   accountNumber: "123456789012",
@@ -16,6 +17,7 @@ const bundle: GuestBundle = {
   payWhenDueWithinDays: 14,
   allowedTopLevelOrigins: ["https://www.sce.com"],
   allowedFrameOrigins: ["https://payments.example.test"],
+  allowedRequestOrigins: ["https://www.sce.com", "https://payments.example.test"],
   storageState: { cookies: [], origins: [] },
   sessionStorageByOrigin: {},
 };
@@ -30,4 +32,18 @@ test("onboarding bundle encrypts and decrypts without plaintext fields", async (
 test("wrong encryption key cannot open a bundle", async () => {
   const encrypted = await encryptBundle(bundle, generateBundleKey());
   await assert.rejects(decryptBundle(encrypted, generateBundleKey()));
+});
+
+test("envelope metadata is authenticated", async () => {
+  const key = generateBundleKey();
+  const encrypted = await encryptBundle(bundle, key);
+  await assert.rejects(
+    decryptBundle(
+      {
+        ...encrypted,
+        bundleId: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      },
+      key,
+    ),
+  );
 });

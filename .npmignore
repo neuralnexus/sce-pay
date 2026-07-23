@@ -1,0 +1,9 @@
+.sce-pay/
+.npm-cache/
+.test-dist/
+.wrangler/
+.wrangler-dry-run/
+.xdg-config/
+node_modules/
+playwright-report/
+test-results/
