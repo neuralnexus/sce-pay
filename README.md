@@ -5,6 +5,8 @@ card through SCE Guest Pay. A one-time local wizard calibrates the live flow and
 deploys a Cloudflare Worker; Cloudflare Cron, Browser Run, and a Durable Object
 then operate without a computer left online.
 
+This is necessary because SCE does not allow credit cards for autopay. Shame!
+
 The project is independent of and not endorsed by Southern California Edison or
 Cloudflare.
 
