@@ -1,6 +1,6 @@
 # SCE Pay
 
-`sce-pay` automates paying the entire current Southern California Edison bill by
+`sce-pay` automates paying your current Southern California Edison bill by
 card through SCE Guest Pay. A one-time local wizard calibrates the live flow and
 deploys a Cloudflare Worker; Cloudflare Cron, Browser Run, and a Durable Object
 then operate without a computer left online.
@@ -8,7 +8,7 @@ then operate without a computer left online.
 This is necessary because SCE does not allow credit cards for autopay. Shame!
 
 The project is independent of and not endorsed by Southern California Edison or
-Cloudflare.
+Cloudflare. 
 
 ## Install
 
@@ -20,7 +20,7 @@ npx wrangler login
 npm run setup
 ```
 
-The wizard performs a preflight, opens the current SCE Guest Pay route in local
+The wizard performs a preflight check, opens the SCE Guest Pay route in local
 Chrome, and asks you to stop at the final review without submitting. It then:
 
 1. proves the reviewed card ending from the page rather than trusting typed
@@ -63,7 +63,6 @@ Cloudflare documents Browser Run support and current limits at
 
 Every real submission requires:
 
-- a current, plausible SCE bill cycle;
 - the entire current amount due;
 - an amount at or below the configured bill ceiling;
 - a due date inside the configured payment window;
@@ -74,8 +73,6 @@ Every real submission requires:
 - the reviewed route and origin contract;
 - no confirmed fingerprint for the same account, due date, and amount; and
 - no unresolved earlier submission.
-
-The old exact `$1.65` assumption is gone.
 
 Immediately before the one final click, the Durable Object revalidates its
 exclusive lease and writes a durable `submitting` intent in the same serialized
